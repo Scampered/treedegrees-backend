@@ -26,43 +26,69 @@ function getApproxCoords(country) {
   return COUNTRY_CAPITALS[(country || '').toLowerCase().trim()] || null;
 }
 
+function approxCoordsForUser(country, lat, lon) {
+  const cap = getApproxCoords(country);
+  return cap ? { lat: cap[0], lon: cap[1] } : { lat, lon };
+}
+
 function resolveCoords(user, viewerDegree) {
   const privacy = user.location_privacy || 'exact';
   const isDirectFriend = viewerDegree === 1 || viewerDegree === 0;
   if (privacy === 'exact') return { lat: user.latitude, lon: user.longitude, isApproximate: false };
   if (privacy === 'private') {
     if (isDirectFriend) return { lat: user.latitude, lon: user.longitude, isApproximate: false };
-    const approx = getApproxCoords(user.country);
-    if (approx) return { lat: approx[0], lon: approx[1], isApproximate: true };
-    return { lat: user.latitude, lon: user.longitude, isApproximate: true };
+    const a = approxCoordsForUser(user.country, user.latitude, user.longitude);
+    return { lat: a.lat, lon: a.lon, isApproximate: true };
   }
-  const approx = getApproxCoords(user.country);
-  if (approx) return { lat: approx[0], lon: approx[1], isApproximate: true };
-  return { lat: user.latitude, lon: user.longitude, isApproximate: true };
+  // hidden
+  const a = approxCoordsForUser(user.country, user.latitude, user.longitude);
+  return { lat: a.lat, lon: a.lon, isApproximate: true };
 }
 
 // ── GET /api/graph/map ────────────────────────────────────────────────────────
 router.get('/map', requireAuth, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const viewerId = req.user.id;
 
+    // 1. All accepted friendships with per-side privacy flags
     const { rows: allFriendships } = await pool.query(
-      `SELECT user_id_1, user_id_2, private_for_user1, private_for_user2
+      `SELECT user_id_1, user_id_2, requester_id,
+              private_for_user1, private_for_user2
        FROM friendships WHERE status = 'accepted'`
     );
 
+    // 2. Build adjacency and degrees from viewer
     const adjacency = buildAdjacency(allFriendships);
-    const degrees = computeDegrees(adjacency, userId, 3);
-    const relevantIds = [userId, ...degrees.keys()];
+    const degrees   = computeDegrees(adjacency, viewerId, 4); // up to 4 degrees
 
-    // Also fetch direct friends of viewer to know who allowed full name reveal
-    const { rows: myFriendships } = await pool.query(
-      `SELECT CASE WHEN user_id_1 = $1 THEN user_id_2 ELSE user_id_1 END AS friend_id
-       FROM friendships WHERE (user_id_1 = $1 OR user_id_2 = $1) AND status = 'accepted'`,
-      [userId]
+    // 3. Viewer's direct friend IDs
+    const myFriendIds = new Set(
+      allFriendships
+        .filter(f => f.user_id_1 === viewerId || f.user_id_2 === viewerId)
+        .map(f => f.user_id_1 === viewerId ? f.user_id_2 : f.user_id_1)
     );
-    const myFriendIds = new Set(myFriendships.map(r => r.friend_id));
 
+    // 4. Build friendship lookup: "nodeA-nodeB" => { private_for_user1, private_for_user2 }
+    const friendshipMap = {};
+    for (const f of allFriendships) {
+      const key = [f.user_id_1, f.user_id_2].sort().join('-');
+      friendshipMap[key] = f;
+    }
+
+    // Helper: is the connection between two users private FROM a given user's side?
+    function isPrivateFor(uid, otherUid) {
+      const [u1, u2] = [uid, otherUid].sort();
+      const key = `${u1}-${u2}`;
+      const f = friendshipMap[key];
+      if (!f) return false;
+      if (uid === f.user_id_1) return f.private_for_user1;
+      return f.private_for_user2;
+    }
+
+    // 5. Relevant user IDs (viewer + up to 4 degrees)
+    const relevantIds = [viewerId, ...degrees.keys()];
+
+    // 6. Fetch user data for all relevant nodes
     const { rows: users } = await pool.query(
       `SELECT id, full_name, nickname, city, country, latitude, longitude,
               is_public, location_privacy, daily_note
@@ -70,50 +96,167 @@ router.get('/map', requireAuth, async (req, res) => {
        WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL AND latitude IS NOT NULL`,
       [relevantIds]
     );
+    const userById = Object.fromEntries(users.map(u => [u.id, u]));
 
+    // 7. Fetch all personal nicknames the VIEWER has set for others
+    const { rows: myNicknames } = await pool.query(
+      `SELECT target_id, nickname FROM connection_nicknames WHERE creator_id = $1`,
+      [viewerId]
+    );
+    const myNicknameMap = Object.fromEntries(myNicknames.map(n => [n.target_id, n.nickname]));
+
+    // 8. Fetch all personal nicknames set BY the viewer's direct friends
+    //    (used for degree-2+ propagation)
+    //    Only propagate if: creator is public profile AND their connection to the target is public
+    const { rows: friendNicknames } = await pool.query(
+      `SELECT cn.creator_id, cn.target_id, cn.nickname
+       FROM connection_nicknames cn
+       JOIN users u ON cn.creator_id = u.id
+       WHERE cn.creator_id = ANY($1::uuid[])
+         AND u.is_public = true
+         AND u.deleted_at IS NULL`,
+      [[...myFriendIds]]
+    );
+
+    // Group friend nicknames by target_id, track which degree creator is at
+    // { targetId => [ { nickname, creatorDegree } ] }
+    const propagatedNicknames = {};
+    for (const fn of friendNicknames) {
+      // Only propagate if the creator's connection to target is public
+      if (isPrivateFor(fn.creator_id, fn.target_id)) continue;
+      const creatorDegree = fn.creator_id === viewerId ? 0 : (degrees.get(fn.creator_id) ?? 99);
+      if (!propagatedNicknames[fn.target_id]) propagatedNicknames[fn.target_id] = [];
+      propagatedNicknames[fn.target_id].push({ nickname: fn.nickname, creatorDegree });
+    }
+
+    // 9. Nickname resolution function for a given node as seen by the viewer
+    function resolveNickname(nodeId, nodeDegree) {
+      const u = userById[nodeId];
+      if (!u) return '?';
+      const ownNick = u.nickname || u.full_name?.split(' ')[0] || '?';
+
+      // Self
+      if (nodeId === viewerId) return ownNick;
+
+      // Viewer's personal nickname for this person always wins
+      if (myNicknameMap[nodeId]) return myNicknameMap[nodeId];
+
+      // Degree 1: no propagation needed, just their own nickname
+      if (nodeDegree === 1) return ownNick;
+
+      // Degree 2+: check propagated nicknames from friends
+      const propagated = propagatedNicknames[nodeId];
+      if (!propagated || propagated.length === 0) return ownNick;
+
+      // Sort by creatorDegree ascending (closest degree wins)
+      propagated.sort((a, b) => a.creatorDegree - b.creatorDegree);
+      const minDegree = propagated[0].creatorDegree;
+      const closest = propagated.filter(p => p.creatorDegree === minDegree);
+
+      // Multiple at same degree → join with " / "
+      const nicknameStr = closest.map(p => p.nickname).join(' / ');
+      return nicknameStr || ownNick;
+    }
+
+    // 10. "?" rule: public profile + private connection from an intermediate node
+    //     → hide identity from the viewer, show approximate location
+    function isHiddenByPrivateLink(nodeId, nodeDegree) {
+      const u = userById[nodeId];
+      if (!u) return false;
+      if (nodeId === viewerId) return false;
+      if (!u.is_public) return false; // already handled by private profile logic
+      if (nodeDegree === 1) return false; // direct friend, always visible
+
+      // Check if ALL paths to this node go through at least one private connection
+      // Simplified: if none of the viewer's direct friends have a PUBLIC connection to this node
+      // and this node has a public profile → show "?"
+      const neighbours = adjacency.get(nodeId) || new Set();
+      for (const nId of neighbours) {
+        if (!myFriendIds.has(nId) && nId !== viewerId) continue;
+        // nId is a direct friend of viewer (or viewer themselves)
+        const connectionPrivateFromNId = isPrivateFor(nId, nodeId);
+        if (!connectionPrivateFromNId) return false; // at least one public path
+      }
+      return true; // all paths through private connections
+    }
+
+    // 11. Build nodes
     const nodes = users.map(u => {
-      const degree = u.id === userId ? 0 : (degrees.get(u.id) || null);
-      const isMe = u.id === userId;
-      const { lat, lon, isApproximate } = isMe
-        ? { lat: u.latitude, lon: u.longitude, isApproximate: false }
-        : resolveCoords(u, degree);
+      const degree = u.id === viewerId ? 0 : (degrees.get(u.id) ?? null);
+      const isMe   = u.id === viewerId;
 
-      // Full name visible only to: self OR direct friends (degree 1) OR if user is public
-      const canSeeFullName = isMe || myFriendIds.has(u.id) || u.is_public;
-      const displayNick = u.nickname || u.full_name?.split(' ')[0] || '?';
+      // "?" rule check
+      const hiddenByPrivateLink = !isMe && isHiddenByPrivateLink(u.id, degree);
+
+      // Coordinate resolution
+      let lat, lon, isApproximate;
+      if (isMe) {
+        lat = u.latitude; lon = u.longitude; isApproximate = false;
+      } else if (hiddenByPrivateLink) {
+        // Force approximate for "?" nodes
+        const a = approxCoordsForUser(u.country, u.latitude, u.longitude);
+        lat = a.lat; lon = a.lon; isApproximate = true;
+      } else {
+        const coords = resolveCoords(u, degree);
+        lat = coords.lat; lon = coords.lon; isApproximate = coords.isApproximate;
+      }
+
+      // Nickname resolution
+      const resolvedNickname = hiddenByPrivateLink ? '?' : resolveNickname(u.id, degree);
+
+      // Full name: visible to self, direct friends, or public profile (if not "?")
+      const canSeeFullName = isMe || myFriendIds.has(u.id) || (u.is_public && !hiddenByPrivateLink);
+
+      // Notes: visible to direct friends always, public profiles if not "?"
+      const canSeeNote = !isMe && (myFriendIds.has(u.id) || (u.is_public && !hiddenByPrivateLink));
 
       return {
-        id: u.id, degree,
-        latitude: lat, longitude: lon,
+        id: u.id,
+        degree,
+        latitude: lat,
+        longitude: lon,
         locationPrivacy: isApproximate,
-        city: u.city, country: u.country,
-        nickname: displayNick,
+        hiddenByPrivateLink,
+        city: hiddenByPrivateLink ? u.country : u.city,
+        country: u.country,
+        nickname: resolvedNickname,
         fullName: canSeeFullName ? u.full_name : null,
         isPublic: u.is_public,
-        // Notes visible to: self, direct friends (degree 1), or public profiles
-        dailyNote: (isMe || degree === 1 || u.is_public) ? u.daily_note : null,
+        dailyNote: canSeeNote ? u.daily_note : null,
       };
     });
 
+    // 12. Build edges
     const nodeIds = new Set(nodes.map(n => n.id));
-    const edges = [];
+    const edges   = [];
 
     for (const f of allFriendships) {
       const { user_id_1, user_id_2, private_for_user1, private_for_user2 } = f;
       if (!nodeIds.has(user_id_1) || !nodeIds.has(user_id_2)) continue;
 
-      const deg1 = user_id_1 === userId ? 0 : (degrees.get(user_id_1) ?? 99);
-      const deg2 = user_id_2 === userId ? 0 : (degrees.get(user_id_2) ?? 99);
+      const deg1 = user_id_1 === viewerId ? 0 : (degrees.get(user_id_1) ?? 99);
+      const deg2 = user_id_2 === viewerId ? 0 : (degrees.get(user_id_2) ?? 99);
       const edgeDegree = Math.max(deg1, deg2);
-      if (edgeDegree > 3) continue;
+      if (edgeDegree > 4) continue;
 
-      // Edge is private if either end marked it private (from viewer's perspective)
+      // Edge is private if either side marked it private
       const isPrivate = private_for_user1 || private_for_user2;
 
-      edges.push({ source: user_id_1, target: user_id_2, degree: edgeDegree, isPrivate });
+      // "?" edge: public profile + private connection → dashed grey
+      const node1 = nodes.find(n => n.id === user_id_1);
+      const node2 = nodes.find(n => n.id === user_id_2);
+      const isHidden = node1?.hiddenByPrivateLink || node2?.hiddenByPrivateLink;
+
+      edges.push({
+        source: user_id_1,
+        target: user_id_2,
+        degree: edgeDegree,
+        isPrivate: isPrivate || isHidden,
+        isHidden,
+      });
     }
 
-    res.json({ nodes, edges, myId: userId });
+    res.json({ nodes, edges, myId: viewerId });
   } catch (err) {
     console.error('Graph map error:', err.message);
     res.status(500).json({ error: 'Server error' });
@@ -131,7 +274,7 @@ router.get('/path/:targetId', requireAuth, async (req, res) => {
     if (!path) return res.json({ connected: false, path: null, degrees: null });
 
     const { rows: pathUsers } = await pool.query(
-      `SELECT id, nickname, full_name, city, is_public FROM users WHERE id = ANY($1::uuid[])`, [path]
+      `SELECT id, nickname, full_name, city FROM users WHERE id = ANY($1::uuid[])`, [path]
     );
     const userMap = Object.fromEntries(pathUsers.map(u => [u.id, u]));
 

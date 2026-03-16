@@ -9,6 +9,7 @@ import authRoutes from './routes/auth.js';
 import friendsRoutes from './routes/friends.js';
 import graphRoutes from './routes/graph.js';
 import usersRoutes from './routes/users.js';
+import nicknamesRoutes from './routes/nicknames.js';
 
 dotenv.config();
 
@@ -22,7 +23,6 @@ app.set('trust proxy', 1);
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:3000',
-  'https://treedegrees.vercel.app',
   process.env.FRONTEND_URL,
 ].filter(Boolean);
 
@@ -64,6 +64,7 @@ app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/friends', apiLimiter, friendsRoutes);
 app.use('/api/graph', apiLimiter, graphRoutes);
 app.use('/api/users', apiLimiter, usersRoutes);
+app.use('/api/nicknames', apiLimiter, nicknamesRoutes);
 
 // ── 404 handler ───────────────────────────────────────────────────────────────
 app.use((req, res) => {
