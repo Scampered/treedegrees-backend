@@ -43,7 +43,7 @@ function getCapitalCoords(country) {
 // ── PATCH /api/users/profile ──────────────────────────────────────────────────
 router.patch('/profile', requireAuth, async (req, res) => {
   try {
-    const { bio, nickname, city, country, latitude, longitude, isPublic, connectionsPublic, locationPrivacy } = req.body;
+    const { bio, nickname, fullName, city, country, latitude, longitude, isPublic, connectionsPublic, locationPrivacy } = req.body;
 
     const validPrivacy = ['exact', 'private', 'hidden'];
     const privacyValue = validPrivacy.includes(locationPrivacy) ? locationPrivacy : null;
@@ -52,6 +52,7 @@ router.patch('/profile', requireAuth, async (req, res) => {
       `UPDATE users SET
         bio = COALESCE($1, bio),
         nickname = COALESCE($2, nickname),
+        full_name = COALESCE($11, full_name),
         city = COALESCE($3, city),
         country = COALESCE($4, country),
         latitude = COALESCE($5, latitude),
@@ -62,13 +63,13 @@ router.patch('/profile', requireAuth, async (req, res) => {
        WHERE id = $10 AND deleted_at IS NULL
        RETURNING id, full_name, nickname, bio, city, country, latitude, longitude,
                  is_public, connections_public, location_privacy`,
-      [bio, nickname || null, city, country, latitude, longitude, isPublic, connectionsPublic, privacyValue, req.user.id]
+      [bio, nickname || null, city, country, latitude, longitude, isPublic, connectionsPublic, privacyValue, req.user.id, fullName || null]
     );
 
     if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
     const u = rows[0];
     res.json({
-      id: u.id, fullName: u.full_name, nickname: u.nickname, bio: u.bio,
+      id: u.id, fullName: u.full_name, nickname: u.nickname, bio: u.bio, updatedFullName: u.full_name,
       city: u.city, country: u.country,
       latitude: u.latitude, longitude: u.longitude,
       isPublic: u.is_public, connectionsPublic: u.connections_public,

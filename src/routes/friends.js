@@ -62,7 +62,7 @@ router.get('/', requireAuth, async (req, res) => {
 router.get('/requests', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT f.id AS request_id, u.id, u.nickname, u.full_name, u.city, u.country, f.created_at
+      `SELECT f.id AS request_id, u.id, u.nickname, u.full_name, u.bio, u.city, u.country, f.created_at
        FROM friendships f
        JOIN users u ON f.requester_id = u.id
        WHERE (f.user_id_1 = $1 OR f.user_id_2 = $1)
@@ -80,6 +80,7 @@ router.get('/requests', requireAuth, async (req, res) => {
         displayName: r.nickname || r.full_name,
         city: r.city,
         country: r.country,
+        bio: r.bio || null,
       },
       createdAt: r.created_at,
     })));
@@ -210,6 +211,32 @@ router.patch('/:friendshipId/privacy', requireAuth, async (req, res) => {
     res.json({ message: `Connection is now ${isPrivate ? 'private' : 'public'}` });
   } catch (err) {
     console.error('Privacy toggle error:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
+// ── GET /api/friends/preview/:friendCode ─────────────────────────────────────
+// Look up a user's public info before sending a request — shows bio preview
+router.get('/preview/:friendCode', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, nickname, full_name, city, country, bio, is_public
+       FROM users WHERE friend_code = $1 AND deleted_at IS NULL`,
+      [req.params.friendCode.toUpperCase().trim()]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'No user found with that friend code' });
+    const u = rows[0];
+    if (u.id === req.user.id) return res.status(400).json({ error: 'That is your own code' });
+    res.json({
+      id: u.id,
+      displayName: u.nickname || u.full_name,
+      city: u.city,
+      country: u.country,
+      bio: u.is_public ? u.bio : null,
+    });
+  } catch (err) {
+    console.error('Preview error:', err.message);
     res.status(500).json({ error: 'Server error' });
   }
 });
