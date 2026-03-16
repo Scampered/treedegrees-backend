@@ -10,6 +10,7 @@ import friendsRoutes from './routes/friends.js';
 import graphRoutes from './routes/graph.js';
 import usersRoutes from './routes/users.js';
 import nicknamesRoutes from './routes/nicknames.js';
+import lettersRoutes from './routes/letters.js';
 
 dotenv.config();
 
@@ -65,6 +66,7 @@ app.use('/api/friends', apiLimiter, friendsRoutes);
 app.use('/api/graph', apiLimiter, graphRoutes);
 app.use('/api/users', apiLimiter, usersRoutes);
 app.use('/api/nicknames', apiLimiter, nicknamesRoutes);
+app.use('/api/letters', apiLimiter, lettersRoutes);
 
 // ── 404 handler ───────────────────────────────────────────────────────────────
 app.use((req, res) => {
