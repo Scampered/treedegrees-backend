@@ -90,7 +90,8 @@ router.get('/map', requireAuth, async (req, res) => {
         nickname: displayNick,
         fullName: canSeeFullName ? u.full_name : null,
         isPublic: u.is_public,
-        dailyNote: u.is_public ? u.daily_note : null,
+        // Notes visible to: self, direct friends (degree 1), or public profiles
+        dailyNote: (isMe || degree === 1 || u.is_public) ? u.daily_note : null,
       };
     });
 
