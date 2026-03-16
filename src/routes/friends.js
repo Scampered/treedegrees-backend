@@ -5,16 +5,22 @@ import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
 
+// Helper: is this friendship private from the requester's perspective?
+function isPrivateForMe(f, myId) {
+  if (f.user_id_1 === myId) return f.private_for_user1;
+  return f.private_for_user2;
+}
+
 // ── GET /api/friends ──────────────────────────────────────────────────────────
-// List current user's accepted friends
 router.get('/', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT
-        u.id, u.full_name, u.city, u.country, u.latitude, u.longitude,
+        u.id, u.full_name, u.nickname, u.city, u.country, u.latitude, u.longitude,
         u.friend_code, u.bio, u.is_public, u.connections_public,
         u.daily_note, u.daily_note_updated_at,
-        f.created_at AS connected_since
+        f.id AS friendship_id, f.created_at AS connected_since,
+        f.user_id_1, f.private_for_user1, f.private_for_user2
        FROM friendships f
        JOIN users u ON (
          CASE WHEN f.user_id_1 = $1 THEN f.user_id_2 ELSE f.user_id_1 END = u.id
@@ -22,25 +28,30 @@ router.get('/', requireAuth, async (req, res) => {
        WHERE (f.user_id_1 = $1 OR f.user_id_2 = $1)
          AND f.status = 'accepted'
          AND u.deleted_at IS NULL
-       ORDER BY u.full_name`,
+       ORDER BY u.nickname, u.full_name`,
       [req.user.id]
     );
 
-    res.json(rows.map(u => ({
-      id: u.id,
-      fullName: u.is_public ? u.full_name : '🔒 Private User',
-      city: u.city,
-      country: u.country,
-      latitude: u.latitude,
-      longitude: u.longitude,
-      friendCode: u.friend_code,
-      bio: u.is_public ? u.bio : null,
-      isPublic: u.is_public,
-      connectionsPublic: u.connections_public,
-      dailyNote: u.is_public ? u.daily_note : null,
-      dailyNoteUpdatedAt: u.is_public ? u.daily_note_updated_at : null,
-      connectedSince: u.connected_since,
-    })));
+    res.json(rows.map(u => {
+      const myPrivate = u.user_id_1 === req.user.id ? u.private_for_user1 : u.private_for_user2;
+      return {
+        id: u.id,
+        friendshipId: u.friendship_id,
+        displayName: u.nickname || u.full_name,
+        fullName: u.full_name,
+        city: u.city,
+        country: u.country,
+        latitude: u.latitude,
+        longitude: u.longitude,
+        friendCode: u.friend_code,
+        bio: u.is_public ? u.bio : null,
+        isPublic: u.is_public,
+        dailyNote: u.is_public ? u.daily_note : null,
+        dailyNoteUpdatedAt: u.is_public ? u.daily_note_updated_at : null,
+        connectedSince: u.connected_since,
+        isPrivate: myPrivate, // MY setting for this friendship
+      };
+    }));
   } catch (err) {
     console.error('List friends error:', err.message);
     res.status(500).json({ error: 'Server error' });
@@ -48,11 +59,10 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // ── GET /api/friends/requests ─────────────────────────────────────────────────
-// Incoming pending requests
 router.get('/requests', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT f.id AS request_id, u.id, u.full_name, u.city, u.country, f.created_at
+      `SELECT f.id AS request_id, u.id, u.nickname, u.full_name, u.city, u.country, f.created_at
        FROM friendships f
        JOIN users u ON f.requester_id = u.id
        WHERE (f.user_id_1 = $1 OR f.user_id_2 = $1)
@@ -65,7 +75,12 @@ router.get('/requests', requireAuth, async (req, res) => {
 
     res.json(rows.map(r => ({
       requestId: r.request_id,
-      user: { id: r.id, fullName: r.full_name, city: r.city, country: r.country },
+      user: {
+        id: r.id,
+        displayName: r.nickname || r.full_name,
+        city: r.city,
+        country: r.country,
+      },
       createdAt: r.created_at,
     })));
   } catch (err) {
@@ -75,15 +90,14 @@ router.get('/requests', requireAuth, async (req, res) => {
 });
 
 // ── POST /api/friends/add ─────────────────────────────────────────────────────
-// Add a friend by their unique friend code
+// isPrivate = whether the SENDER marks this as private from their side
 router.post('/add', requireAuth, async (req, res) => {
   try {
-    const { friendCode } = req.body;
+    const { friendCode, isPrivate = false } = req.body;
     if (!friendCode) return res.status(400).json({ error: 'Friend code required' });
 
-    // Find target user
     const targetResult = await pool.query(
-      'SELECT id, full_name, city, country FROM users WHERE friend_code = $1 AND deleted_at IS NULL',
+      'SELECT id, nickname, full_name, city, country FROM users WHERE friend_code = $1 AND deleted_at IS NULL',
       [friendCode.toUpperCase().trim()]
     );
 
@@ -92,14 +106,11 @@ router.post('/add', requireAuth, async (req, res) => {
     }
 
     const target = targetResult.rows[0];
-    if (target.id === req.user.id) {
-      return res.status(400).json({ error: 'You cannot add yourself' });
-    }
+    if (target.id === req.user.id) return res.status(400).json({ error: 'You cannot add yourself' });
 
-    // Canonical order for undirected edge
     const [uid1, uid2] = [req.user.id, target.id].sort();
+    const iAmUser1 = req.user.id === uid1;
 
-    // Check existing relationship
     const existing = await pool.query(
       'SELECT id, status FROM friendships WHERE user_id_1 = $1 AND user_id_2 = $2',
       [uid1, uid2]
@@ -112,15 +123,20 @@ router.post('/add', requireAuth, async (req, res) => {
       if (status === 'blocked') return res.status(403).json({ error: 'Cannot connect with this user' });
     }
 
+    // Store sender's privacy preference immediately
     await pool.query(
-      `INSERT INTO friendships (user_id_1, user_id_2, status, requester_id)
-       VALUES ($1, $2, 'pending', $3)`,
-      [uid1, uid2, req.user.id]
+      `INSERT INTO friendships
+        (user_id_1, user_id_2, status, requester_id, private_for_user1, private_for_user2)
+       VALUES ($1, $2, 'pending', $3, $4, $5)`,
+      [uid1, uid2, req.user.id,
+        iAmUser1 ? isPrivate : false,
+        iAmUser1 ? false : isPrivate]
     );
 
+    const displayName = target.nickname || target.full_name;
     res.status(201).json({
-      message: `Connection request sent to ${target.full_name}`,
-      target: { id: target.id, fullName: target.full_name, city: target.city, country: target.country },
+      message: `Connection request sent to ${displayName}`,
+      target: { id: target.id, displayName, city: target.city, country: target.country },
     });
   } catch (err) {
     console.error('Add friend error:', err.message);
@@ -129,10 +145,10 @@ router.post('/add', requireAuth, async (req, res) => {
 });
 
 // ── PATCH /api/friends/respond/:requestId ─────────────────────────────────────
-// Accept or decline a request
+// Accept or decline — acceptor can also set their own privacy side
 router.patch('/respond/:requestId', requireAuth, async (req, res) => {
   try {
-    const { action } = req.body; // 'accept' | 'decline'
+    const { action, isPrivate = false } = req.body;
     if (!['accept', 'decline'].includes(action)) {
       return res.status(400).json({ error: 'Action must be accept or decline' });
     }
@@ -144,12 +160,21 @@ router.patch('/respond/:requestId', requireAuth, async (req, res) => {
       [req.params.requestId, req.user.id]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Request not found' });
-    }
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Request not found' });
+
+    const f = result.rows[0];
+    const iAmUser1 = f.user_id_1 === req.user.id;
 
     if (action === 'accept') {
-      await pool.query("UPDATE friendships SET status = 'accepted' WHERE id = $1", [req.params.requestId]);
+      // Set acceptor's privacy preference on their side
+      await pool.query(
+        `UPDATE friendships SET
+          status = 'accepted',
+          private_for_user1 = CASE WHEN user_id_1 = $2 THEN $3 ELSE private_for_user1 END,
+          private_for_user2 = CASE WHEN user_id_2 = $2 THEN $3 ELSE private_for_user2 END
+         WHERE id = $1`,
+        [req.params.requestId, req.user.id, isPrivate]
+      );
       res.json({ message: 'Connection accepted' });
     } else {
       await pool.query('DELETE FROM friendships WHERE id = $1', [req.params.requestId]);
@@ -157,6 +182,34 @@ router.patch('/respond/:requestId', requireAuth, async (req, res) => {
     }
   } catch (err) {
     console.error('Respond error:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── PATCH /api/friends/:friendshipId/privacy ──────────────────────────────────
+// Toggle private/public for MY side of an existing friendship
+router.patch('/:friendshipId/privacy', requireAuth, async (req, res) => {
+  try {
+    const { isPrivate } = req.body;
+    if (typeof isPrivate !== 'boolean') {
+      return res.status(400).json({ error: 'isPrivate must be a boolean' });
+    }
+
+    const result = await pool.query(
+      `UPDATE friendships SET
+        private_for_user1 = CASE WHEN user_id_1 = $2 THEN $3 ELSE private_for_user1 END,
+        private_for_user2 = CASE WHEN user_id_2 = $2 THEN $3 ELSE private_for_user2 END
+       WHERE id = $1
+         AND (user_id_1 = $2 OR user_id_2 = $2)
+         AND status = 'accepted'
+       RETURNING id`,
+      [req.params.friendshipId, req.user.id, isPrivate]
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Friendship not found' });
+    res.json({ message: `Connection is now ${isPrivate ? 'private' : 'public'}` });
+  } catch (err) {
+    console.error('Privacy toggle error:', err.message);
     res.status(500).json({ error: 'Server error' });
   }
 });
