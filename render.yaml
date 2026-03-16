@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: treedegrees-api
+    env: node
+    region: oregon  # choose closest to your users
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3001
+      # Set these in the Render dashboard (never commit secrets):
+      # DATABASE_URL, JWT_SECRET, FRIENDCODE_SALT, FRONTEND_URL
