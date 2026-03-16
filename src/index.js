@@ -15,16 +15,31 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// ── Security middleware ───────────────────────────────────────────────────────
-app.use(helmet());
+// ── Trust proxy (required on Render — sits behind a load balancer) ────────────
+app.set('trust proxy', 1);
+
+// ── CORS ──────────────────────────────────────────────────────────────────────
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  process.env.FRONTEND_URL,
+].filter(Boolean);
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error(`CORS blocked: ${origin}`));
+  },
   credentials: true,
 }));
 
+// ── Security middleware ───────────────────────────────────────────────────────
+app.use(helmet());
+
 // ── Rate limiting ─────────────────────────────────────────────────────────────
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 10,
   message: { error: 'Too many requests, please try again later' },
   standardHeaders: true,
@@ -32,7 +47,7 @@ const authLimiter = rateLimit({
 });
 
 const apiLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
+  windowMs: 60 * 1000,
   max: 120,
   message: { error: 'Rate limit exceeded' },
 });
@@ -64,4 +79,5 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`🌳 TreeDegrees API running on port ${PORT}`);
   console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`   Allowed origins: ${allowedOrigins.join(', ')}`);
 });
