@@ -5,6 +5,7 @@
 import nodemailer from 'nodemailer';
 
 let transporter = null;
+console.log("🚀 sendVerificationEmail CALLED with:", toEmail);
 
 function getTransporter() {
   if (transporter) return transporter;
