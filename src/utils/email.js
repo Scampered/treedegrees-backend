@@ -108,7 +108,7 @@ function letterArrivedTemplate(nickname, senderName, vehicleEmoji) {
 }
 
 // ── Public send functions ─────────────────────────────────────────────────────
-
+console.log("📩 About to send verification email...");
 export async function sendVerificationEmail(toEmail, nickname, token) {
   const t = getTransporter();
   if (!t) return false;
