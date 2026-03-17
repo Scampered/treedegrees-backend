@@ -12,6 +12,7 @@ import usersRoutes from './routes/users.js';
 import nicknamesRoutes from './routes/nicknames.js';
 import lettersRoutes from './routes/letters.js';
 import adminRoutes from './routes/admin.js';
+import debugRoutes from './routes/debug.js';
 import { requireAuth } from './middleware/auth.js';
 import pool from './db/pool.js';
 import { verifyToken } from './utils/auth.js';
@@ -54,6 +55,46 @@ const apiLimiter = rateLimit({
 
 app.use(express.json({ limit: '16kb' }));
 
+// ── User popups — authenticated, returns unseen messages ─────────────────────
+app.get('/api/popups', apiLimiter, async (req, res) => {
+  try {
+    const header = req.headers.authorization;
+    if (!header?.startsWith('Bearer ')) return res.json([]);
+    const payload = verifyToken(header.slice(7));
+    const { rows } = await pool.query(
+      `SELECT p.* FROM admin_popups p
+       WHERE (p.target = 'all' OR p.target = $1)
+         AND (p.expires_at IS NULL OR p.expires_at > NOW())
+         AND p.id NOT IN (
+           SELECT popup_id FROM popup_dismissals WHERE user_id = $1
+         )
+       ORDER BY p.created_at DESC`,
+      [payload.id]
+    );
+    res.json(rows.map(p => ({
+      id: p.id,
+      header: p.header,
+      subheader: p.subheader,
+      buttonText: p.button_text,
+    })));
+  } catch { res.json([]); }
+});
+
+// ── Dismiss popup ─────────────────────────────────────────────────────────────
+app.post('/api/popups/:id/dismiss', apiLimiter, async (req, res) => {
+  try {
+    const header = req.headers.authorization;
+    if (!header?.startsWith('Bearer ')) return res.json({});
+    const payload = verifyToken(header.slice(7));
+    await pool.query(
+      `INSERT INTO popup_dismissals (popup_id, user_id) VALUES ($1, $2)
+       ON CONFLICT DO NOTHING`,
+      [req.params.id, payload.id]
+    );
+    res.json({ dismissed: true });
+  } catch { res.json({}); }
+});
+
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'TreeDegrees API' }));
 
@@ -95,7 +136,8 @@ app.use('/api/graph',     apiLimiter,  graphRoutes);
 app.use('/api/users',     apiLimiter,  usersRoutes);
 app.use('/api/nicknames', apiLimiter,  nicknamesRoutes);
 app.use('/api/letters',   apiLimiter,  lettersRoutes);
-app.use('/api/admin',     apiLimiter,  adminRoutes); // all require requireAdmin inside
+app.use('/api/admin',     apiLimiter,  adminRoutes);
+app.use('/api/debug',     apiLimiter,  debugRoutes); // TEMP: remove after fix // all require requireAdmin inside
 
 // ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: 'Route not found' }));

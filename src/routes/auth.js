@@ -93,7 +93,7 @@ router.post('/login', async (req, res) => {
     const result = await pool.query(
       `SELECT id, full_name, nickname, email, password_hash, city, country, latitude, longitude,
               friend_code, bio, is_public, connections_public, location_privacy,
-              daily_note, daily_note_updated_at
+              daily_note, daily_note_updated_at, email_verified
        FROM users WHERE email = $1 AND deleted_at IS NULL`,
       [email.toLowerCase().trim()]
     );
@@ -116,6 +116,7 @@ router.post('/login', async (req, res) => {
         isPublic: user.is_public, connectionsPublic: user.connections_public,
         locationPrivacy: user.location_privacy,
         dailyNote: user.daily_note, dailyNoteUpdatedAt: user.daily_note_updated_at,
+        emailVerified: user.email_verified,
       },
     });
   } catch (err) {
@@ -174,6 +175,20 @@ router.delete('/account', requireAuth, async (req, res) => {
     res.json({ message: 'Account deleted successfully' });
   } catch (err) {
     console.error('Delete account error:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── POST /api/auth/verify-email ───────────────────────────────────────────────
+router.post('/verify-email', requireAuth, async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE users SET email_verified = true WHERE id = $1',
+      [req.user.id]
+    );
+    res.json({ message: 'Email verified' });
+  } catch (err) {
+    console.error('Verify email error:', err.message);
     res.status(500).json({ error: 'Server error' });
   }
 });
