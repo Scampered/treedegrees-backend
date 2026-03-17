@@ -12,7 +12,6 @@ import usersRoutes from './routes/users.js';
 import nicknamesRoutes from './routes/nicknames.js';
 import lettersRoutes from './routes/letters.js';
 import adminRoutes from './routes/admin.js';
-import debugRoutes from './routes/debug.js';
 import { requireAuth } from './middleware/auth.js';
 import pool from './db/pool.js';
 import { verifyToken } from './utils/auth.js';
@@ -137,7 +136,6 @@ app.use('/api/users',     apiLimiter,  usersRoutes);
 app.use('/api/nicknames', apiLimiter,  nicknamesRoutes);
 app.use('/api/letters',   apiLimiter,  lettersRoutes);
 app.use('/api/admin',     apiLimiter,  adminRoutes);
-app.use('/api/debug',     apiLimiter,  debugRoutes); // TEMP: remove after fix // all require requireAdmin inside
 
 // ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
