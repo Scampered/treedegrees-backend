@@ -3,28 +3,28 @@
 // Set GMAIL_USER and GMAIL_APP_PASSWORD in your Render environment variables.
 
 import nodemailer from 'nodemailer';
+import dns from 'dns';
 
 let transporter = null;
 
 function getTransporter() {
   if (transporter) return transporter;
+
   if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
-    console.warn('⚠️  GMAIL_USER or GMAIL_APP_PASSWORD not set — emails disabled');
+    console.warn('⚠️ GMAIL_USER or GMAIL_APP_PASSWORD not set');
     return null;
   }
+
   transporter = nodemailer.createTransport({
     host: 'smtp.gmail.com',
-    port: 587,
-    secure: false, // TLS
+    port: 465,
+    secure: true, // SSL
     auth: {
       user: process.env.GMAIL_USER,
       pass: process.env.GMAIL_APP_PASSWORD.replace(/\s/g, ''),
     },
-    family: 4, // ✅ FORCE IPv4 (THIS FIXES YOUR ERROR)
-    connectionTimeout: 10000, // 10 seconds
-    greetingTimeout: 10000,
-    socketTimeout: 10000,
   });
+
   return transporter;
 }
 
