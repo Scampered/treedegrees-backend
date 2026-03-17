@@ -20,25 +20,30 @@ router.get('/', requireAuth, async (req, res) => {
         u.friend_code, u.bio, u.is_public, u.connections_public,
         u.daily_note, u.daily_note_updated_at,
         f.id AS friendship_id, f.created_at AS connected_since,
-        f.user_id_1, f.private_for_user1, f.private_for_user2
+        f.user_id_1, f.private_for_user1, f.private_for_user2,
+        cn.nickname AS my_nickname
        FROM friendships f
        JOIN users u ON (
          CASE WHEN f.user_id_1 = $1 THEN f.user_id_2 ELSE f.user_id_1 END = u.id
        )
+       LEFT JOIN connection_nicknames cn ON cn.creator_id = $1 AND cn.target_id = u.id
        WHERE (f.user_id_1 = $1 OR f.user_id_2 = $1)
          AND f.status = 'accepted'
          AND u.deleted_at IS NULL
-       ORDER BY u.nickname, u.full_name`,
+       ORDER BY COALESCE(cn.nickname, u.nickname, u.full_name)`,
       [req.user.id]
     );
 
     res.json(rows.map(u => {
       const myPrivate = u.user_id_1 === req.user.id ? u.private_for_user1 : u.private_for_user2;
+      // Priority: my personal nickname > their own nickname > first name — never full name
+      const displayName = u.my_nickname || u.nickname || u.full_name?.split(' ')[0] || '?';
       return {
         id: u.id,
         friendshipId: u.friendship_id,
-        displayName: u.nickname || u.full_name,
-        fullName: u.full_name,
+        displayName,
+        myNickname: u.my_nickname || null,
+        fullName: null, // never expose full name to frontend
         city: u.city,
         country: u.country,
         latitude: u.latitude,
