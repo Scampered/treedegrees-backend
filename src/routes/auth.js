@@ -6,6 +6,7 @@ import {
   generateFriendCode, isValidEmail, isStrongPassword,
 } from '../utils/auth.js';
 import { requireAuth } from '../middleware/auth.js';
+import { containsProfanity, profanityError } from '../utils/profanity.js';
 
 const router = Router();
 
@@ -24,6 +25,14 @@ router.post('/signup', async (req, res) => {
       return res.status(400).json({
         error: 'Password must be at least 8 characters with uppercase, lowercase, and a number',
       });
+    }
+
+    // Profanity check on name and nickname
+    if (containsProfanity(fullName)) {
+      return res.status(400).json({ error: profanityError('Full name') });
+    }
+    if (nickname && containsProfanity(nickname)) {
+      return res.status(400).json({ error: profanityError('Nickname') });
     }
 
     const existing = await pool.query(

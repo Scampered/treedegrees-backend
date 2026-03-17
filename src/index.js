@@ -11,6 +11,7 @@ import graphRoutes from './routes/graph.js';
 import usersRoutes from './routes/users.js';
 import nicknamesRoutes from './routes/nicknames.js';
 import lettersRoutes from './routes/letters.js';
+import adminRoutes, { checkAdmin } from './routes/admin.js';
 
 dotenv.config();
 
@@ -57,6 +58,17 @@ const apiLimiter = rateLimit({
 // ── Body parsing ──────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '16kb' }));
 
+// ── Public maintenance check (no auth) ───────────────────────────────────────
+app.get('/api/maintenance', async (req, res) => {
+  try {
+    const { default: pool } = await import('./src/db/pool.js');
+    const { rows } = await pool.query('SELECT page_key, is_down, message FROM page_maintenance');
+    const map = {};
+    rows.forEach(r => { map[r.page_key] = { isDown: r.is_down, message: r.message }; });
+    res.json(map);
+  } catch { res.json({}); }
+});
+
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'TreeDegrees API' }));
 
@@ -67,6 +79,19 @@ app.use('/api/graph', apiLimiter, graphRoutes);
 app.use('/api/users', apiLimiter, usersRoutes);
 app.use('/api/nicknames', apiLimiter, nicknamesRoutes);
 app.use('/api/letters', apiLimiter, lettersRoutes);
+app.use('/api/admin', apiLimiter, adminRoutes);
+// /api/admin/me is handled separately to allow non-admins to check status
+app.get('/api/admin/me', authLimiter, async (req, res) => {
+  try {
+    const { verifyToken } = await import('./src/utils/auth.js');
+    const header = req.headers.authorization;
+    if (!header?.startsWith('Bearer ')) return res.json({ isAdmin: false });
+    const payload = verifyToken(header.slice(7));
+    const { default: pool } = await import('./src/db/pool.js');
+    const { rows } = await pool.query('SELECT is_admin FROM users WHERE id = $1 AND deleted_at IS NULL', [payload.id]);
+    res.json({ isAdmin: rows[0]?.is_admin || false });
+  } catch { res.json({ isAdmin: false }); }
+});
 
 // ── 404 handler ───────────────────────────────────────────────────────────────
 app.use((req, res) => {

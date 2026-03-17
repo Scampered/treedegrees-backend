@@ -220,11 +220,7 @@ router.get('/in-transit', requireAuth, async (req, res) => {
        JOIN users su ON l.sender_id = su.id
        JOIN users ru ON l.recipient_id = ru.id
        WHERE l.arrives_at > NOW()
-         AND (l.sender_id=$1 OR l.recipient_id=$1
-           OR l.sender_id IN (
-             SELECT CASE WHEN f.user_id_1=$1 THEN f.user_id_2 ELSE f.user_id_1 END
-             FROM friendships f WHERE (f.user_id_1=$1 OR f.user_id_2=$1) AND f.status='accepted'
-           ))`,
+         AND (l.sender_id=$1 OR l.recipient_id=$1)`,
       [req.user.id]
     );
     res.json(rows.map(l => ({

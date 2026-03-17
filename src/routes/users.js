@@ -2,6 +2,7 @@
 import { Router } from 'express';
 import pool from '../db/pool.js';
 import { requireAuth } from '../middleware/auth.js';
+import { containsProfanity, profanityError } from '../utils/profanity.js';
 
 const router = Router();
 
@@ -29,6 +30,14 @@ function getCapitalCoords(country) {
 router.patch('/profile', requireAuth, async (req, res) => {
   try {
     const { bio, nickname, fullName, city, country, latitude, longitude, isPublic, connectionsPublic, locationPrivacy } = req.body;
+
+    // Profanity check
+    if (fullName && containsProfanity(fullName))
+      return res.status(400).json({ error: profanityError('Full name') });
+    if (nickname && containsProfanity(nickname))
+      return res.status(400).json({ error: profanityError('Nickname') });
+    if (bio && containsProfanity(bio))
+      return res.status(400).json({ error: profanityError('Bio') });
 
     const validPrivacy = ['exact', 'private', 'hidden'];
     const privacyValue = validPrivacy.includes(locationPrivacy) ? locationPrivacy : null;
