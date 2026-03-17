@@ -17,13 +17,17 @@ function getTransporter() {
     port: 587,
     secure: false, // TLS
     auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASSWORD.replace(/\s/g, ''),
-  },
-  family: 4, // ✅ FORCE IPv4 (THIS FIXES YOUR ERROR)
-});
+      user: process.env.GMAIL_USER,
+      pass: process.env.GMAIL_APP_PASSWORD.replace(/\s/g, ''),
+    },
+    family: 4, // ✅ FORCE IPv4 (THIS FIXES YOUR ERROR)
+    connectionTimeout: 10000, // 10 seconds
+    greetingTimeout: 10000,
+    socketTimeout: 10000,
+  });
   return transporter;
 }
+
 
 // ── Email templates ────────────────────────────────────────────────────────────
 function verificationTemplate(nickname, verifyUrl) {
