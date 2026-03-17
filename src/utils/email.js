@@ -5,7 +5,6 @@
 import nodemailer from 'nodemailer';
 
 let transporter = null;
-console.log("🚀 sendVerificationEmail CALLED with:", toEmail);
 
 function getTransporter() {
   if (transporter) return transporter;
@@ -14,12 +13,15 @@ function getTransporter() {
     return null;
   }
   transporter = nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false, // TLS
     auth: {
-      user: process.env.GMAIL_USER,
-      pass: process.env.GMAIL_APP_PASSWORD.replace(/\s/g, ''), // strip any spaces
-    },
-  });
+    user: process.env.GMAIL_USER,
+    pass: process.env.GMAIL_APP_PASSWORD.replace(/\s/g, ''),
+  },
+  family: 4, // ✅ FORCE IPv4 (THIS FIXES YOUR ERROR)
+});
   return transporter;
 }
 
@@ -108,8 +110,9 @@ function letterArrivedTemplate(nickname, senderName, vehicleEmoji) {
 }
 
 // ── Public send functions ─────────────────────────────────────────────────────
-console.log("📩 About to send verification email...");
+
 export async function sendVerificationEmail(toEmail, nickname, token) {
+  console.log("📩 About to send verification email...");
   const t = getTransporter();
   if (!t) return false;
 
