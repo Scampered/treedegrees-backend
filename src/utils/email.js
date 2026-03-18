@@ -1,33 +1,32 @@
 // src/utils/email.js
-// Sends emails via Resend SMTP using nodemailer.
+// Sends emails via Resend HTTP API (no SMTP - works on all hosting platforms)
 // Set RESEND_API_KEY in your environment variables.
 
-import nodemailer from 'nodemailer';
-
-let transporter = null;
-
-function getTransporter() {
-  if (transporter) return transporter;
-
+async function sendMail({ from, to, subject, html, text }) {
   if (!process.env.RESEND_API_KEY) {
     console.warn('⚠️ RESEND_API_KEY not set');
-    return null;
+    return false;
   }
 
-  transporter = nodemailer.createTransport({
-    host: 'smtp.resend.com',
-    port: 587,        // ← change from 465 to 587
-    secure: false,    // ← change from true to false (TLS, not SSL)
-    auth: {
-      user: 'resend',
-      pass: process.env.RESEND_API_KEY,
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
     },
+    body: JSON.stringify({ from, to, subject, html, text }),
   });
 
-  return transporter;
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.message || `Resend API error: ${res.status}`);
+  }
+
+  return res.json();
 }
 
 // ── Email templates ────────────────────────────────────────────────────────
+
 function verificationTemplate(nickname, verifyUrl) {
   return {
     subject: '🌳 Verify your TreeDegrees email',
@@ -111,23 +110,21 @@ function letterArrivedTemplate(nickname, senderName, vehicleEmoji) {
 // ── Public send functions ──────────────────────────────────────────────────
 
 export async function sendVerificationEmail(toEmail, nickname, token) {
-  console.log("📧 About to send verification email...");
-  const t = getTransporter();
-  if (!t) return false;
+  console.log("📧 Sending verification email via Resend API...");
 
   const baseUrl = process.env.FRONTEND_URL || 'https://treedegrees.vercel.app';
   const verifyUrl = `${baseUrl}/verify?token=${token}&email=${encodeURIComponent(toEmail)}`;
   const tmpl = verificationTemplate(nickname, verifyUrl);
 
   try {
-    await t.sendMail({
-      from: '"TreeDegrees 🌳" <onboarding@resend.dev>',
+    await sendMail({
+      from: 'TreeDegrees 🌳 <onboarding@resend.dev>',
       to: toEmail,
       subject: tmpl.subject,
       html: tmpl.html,
       text: tmpl.text,
     });
-    console.log(`✅  Verification email sent to ${toEmail}`);
+    console.log(`✅ Verification email sent to ${toEmail}`);
     return true;
   } catch (err) {
     console.error('Email send error:', err.message);
@@ -136,12 +133,10 @@ export async function sendVerificationEmail(toEmail, nickname, token) {
 }
 
 export async function sendLetterArrivedEmail(toEmail, nickname, senderName, vehicleEmoji) {
-  const t = getTransporter();
-  if (!t) return false;
   const tmpl = letterArrivedTemplate(nickname, senderName, vehicleEmoji);
   try {
-    await t.sendMail({
-      from: '"TreeDegrees 🌳" <onboarding@resend.dev>',
+    await sendMail({
+      from: 'TreeDegrees 🌳 <onboarding@resend.dev>',
       to: toEmail,
       subject: tmpl.subject,
       html: tmpl.html,
