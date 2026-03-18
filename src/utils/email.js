@@ -16,8 +16,8 @@ function getTransporter() {
 
   transporter = nodemailer.createTransport({
     host: 'smtp.resend.com',
-    port: 465,
-    secure: true, // SSL
+    port: 587,        // ← change from 465 to 587
+    secure: false,    // ← change from true to false (TLS, not SSL)
     auth: {
       user: 'resend',
       pass: process.env.RESEND_API_KEY,
