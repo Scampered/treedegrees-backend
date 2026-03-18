@@ -1,35 +1,33 @@
 // src/utils/email.js
-// Sends emails via Gmail SMTP using nodemailer.
-// Set GMAIL_USER and GMAIL_APP_PASSWORD in your Render environment variables.
+// Sends emails via Resend SMTP using nodemailer.
+// Set RESEND_API_KEY in your environment variables.
 
 import nodemailer from 'nodemailer';
-import dns from 'dns';
 
 let transporter = null;
 
 function getTransporter() {
   if (transporter) return transporter;
 
-  if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
-    console.warn('⚠️ GMAIL_USER or GMAIL_APP_PASSWORD not set');
+  if (!process.env.RESEND_API_KEY) {
+    console.warn('⚠️ RESEND_API_KEY not set');
     return null;
   }
 
   transporter = nodemailer.createTransport({
-    host: 'smtp.gmail.com',
+    host: 'smtp.resend.com',
     port: 465,
     secure: true, // SSL
     auth: {
-      user: process.env.GMAIL_USER,
-      pass: process.env.GMAIL_APP_PASSWORD.replace(/\s/g, ''),
+      user: 'resend',
+      pass: process.env.RESEND_API_KEY,
     },
   });
 
   return transporter;
 }
 
-
-// ── Email templates ────────────────────────────────────────────────────────────
+// ── Email templates ────────────────────────────────────────────────────────
 function verificationTemplate(nickname, verifyUrl) {
   return {
     subject: '🌳 Verify your TreeDegrees email',
@@ -41,12 +39,10 @@ function verificationTemplate(nickname, verifyUrl) {
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#082208;padding:40px 20px;">
     <tr><td align="center">
       <table width="480" cellpadding="0" cellspacing="0" style="background:#0d2b0d;border-radius:16px;border:1px solid #196219;overflow:hidden;max-width:100%;">
-        <!-- Header -->
         <tr><td style="background:#113f11;padding:24px 32px;text-align:center;">
           <p style="margin:0;font-size:28px;">🌳</p>
           <h1 style="margin:8px 0 0;color:#80d580;font-size:22px;font-weight:700;">TreeDegrees</h1>
         </td></tr>
-        <!-- Body -->
         <tr><td style="padding:32px;">
           <p style="color:#c0e0c0;font-size:16px;margin:0 0 8px;">Hi ${nickname || 'there'},</p>
           <p style="color:#80a080;font-size:14px;margin:0 0 24px;line-height:1.6;">
@@ -62,7 +58,6 @@ function verificationTemplate(nickname, verifyUrl) {
             This link expires in 24 hours. If you didn't sign up, you can ignore this email.
           </p>
         </td></tr>
-        <!-- Footer -->
         <tr><td style="background:#082208;padding:16px 32px;text-align:center;border-top:1px solid #196219;">
           <p style="color:#2d5a2d;font-size:11px;margin:0;">🌳 TreeDegrees · Your social graph, your way</p>
         </td></tr>
@@ -113,10 +108,10 @@ function letterArrivedTemplate(nickname, senderName, vehicleEmoji) {
   };
 }
 
-// ── Public send functions ─────────────────────────────────────────────────────
+// ── Public send functions ──────────────────────────────────────────────────
 
 export async function sendVerificationEmail(toEmail, nickname, token) {
-  console.log("📩 About to send verification email...");
+  console.log("📧 About to send verification email...");
   const t = getTransporter();
   if (!t) return false;
 
@@ -126,13 +121,13 @@ export async function sendVerificationEmail(toEmail, nickname, token) {
 
   try {
     await t.sendMail({
-      from: `"TreeDegrees 🌳" <${process.env.GMAIL_USER}>`,
+      from: '"TreeDegrees 🌳" <onboarding@resend.dev>',
       to: toEmail,
       subject: tmpl.subject,
       html: tmpl.html,
       text: tmpl.text,
     });
-    console.log(`✉️  Verification email sent to ${toEmail}`);
+    console.log(`✅  Verification email sent to ${toEmail}`);
     return true;
   } catch (err) {
     console.error('Email send error:', err.message);
@@ -146,7 +141,7 @@ export async function sendLetterArrivedEmail(toEmail, nickname, senderName, vehi
   const tmpl = letterArrivedTemplate(nickname, senderName, vehicleEmoji);
   try {
     await t.sendMail({
-      from: `"TreeDegrees 🌳" <${process.env.GMAIL_USER}>`,
+      from: '"TreeDegrees 🌳" <onboarding@resend.dev>',
       to: toEmail,
       subject: tmpl.subject,
       html: tmpl.html,
