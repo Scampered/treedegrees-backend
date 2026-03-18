@@ -1,28 +1,30 @@
 // src/utils/email.js
-// Sends emails via Resend HTTP API (no SMTP - works on all hosting platforms)
-// Set RESEND_API_KEY in your environment variables.
+// Sends emails via Brevo (Sendinblue) SMTP using nodemailer.
+// Set BREVO_SMTP_USER and BREVO_SMTP_PASS in your environment variables.
 
-async function sendMail({ from, to, subject, html, text }) {
-  if (!process.env.RESEND_API_KEY) {
-    console.warn('⚠️ RESEND_API_KEY not set');
-    return false;
+import nodemailer from 'nodemailer';
+
+let transporter = null;
+
+function getTransporter() {
+  if (transporter) return transporter;
+
+  if (!process.env.BREVO_SMTP_USER || !process.env.BREVO_SMTP_PASS) {
+    console.warn('⚠️ BREVO_SMTP_USER or BREVO_SMTP_PASS not set');
+    return null;
   }
 
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
-      'Content-Type': 'application/json',
+  transporter = nodemailer.createTransport({
+    host: 'smtp-relay.brevo.com',
+    port: 587,
+    secure: false, // TLS
+    auth: {
+      user: process.env.BREVO_SMTP_USER,
+      pass: process.env.BREVO_SMTP_PASS,
     },
-    body: JSON.stringify({ from, to, subject, html, text }),
   });
 
-  if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.message || `Resend API error: ${res.status}`);
-  }
-
-  return res.json();
+  return transporter;
 }
 
 // ── Email templates ────────────────────────────────────────────────────────
@@ -110,15 +112,17 @@ function letterArrivedTemplate(nickname, senderName, vehicleEmoji) {
 // ── Public send functions ──────────────────────────────────────────────────
 
 export async function sendVerificationEmail(toEmail, nickname, token) {
-  console.log("📧 Sending verification email via Resend API...");
+  console.log("📧 Sending verification email via Brevo...");
+  const t = getTransporter();
+  if (!t) return false;
 
   const baseUrl = process.env.FRONTEND_URL || 'https://treedegrees.vercel.app';
   const verifyUrl = `${baseUrl}/verify?token=${token}&email=${encodeURIComponent(toEmail)}`;
   const tmpl = verificationTemplate(nickname, verifyUrl);
 
   try {
-    await sendMail({
-      from: 'TreeDegrees 🌳 <onboarding@resend.dev>',
+    await t.sendMail({
+      from: '"TreeDegrees 🌳" <tree3degrees@gmail.com>',
       to: toEmail,
       subject: tmpl.subject,
       html: tmpl.html,
@@ -133,10 +137,12 @@ export async function sendVerificationEmail(toEmail, nickname, token) {
 }
 
 export async function sendLetterArrivedEmail(toEmail, nickname, senderName, vehicleEmoji) {
+  const t = getTransporter();
+  if (!t) return false;
   const tmpl = letterArrivedTemplate(nickname, senderName, vehicleEmoji);
   try {
-    await sendMail({
-      from: 'TreeDegrees 🌳 <onboarding@resend.dev>',
+    await t.sendMail({
+      from: '"TreeDegrees 🌳" <noreply@treedegrees.com>',
       to: toEmail,
       subject: tmpl.subject,
       html: tmpl.html,
