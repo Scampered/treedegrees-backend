@@ -1,30 +1,34 @@
 // src/utils/email.js
-// Sends emails via Brevo (Sendinblue) SMTP using nodemailer.
-// Set BREVO_SMTP_USER and BREVO_SMTP_PASS in your environment variables.
+// Sends emails via Brevo HTTP API (no SMTP - works on all hosting platforms)
+// Set BREVO_API_KEY in your environment variables.
 
-import nodemailer from 'nodemailer';
-
-let transporter = null;
-
-function getTransporter() {
-  if (transporter) return transporter;
-
-  if (!process.env.BREVO_SMTP_USER || !process.env.BREVO_SMTP_PASS) {
-    console.warn('⚠️ BREVO_SMTP_USER or BREVO_SMTP_PASS not set');
-    return null;
+async function sendMail({ from, fromName, to, subject, html, text }) {
+  if (!process.env.BREVO_API_KEY) {
+    console.warn('⚠️ BREVO_API_KEY not set');
+    return false;
   }
 
-  transporter = nodemailer.createTransport({
-    host: 'smtp-relay.brevo.com',
-    port: 587,
-    secure: false, // TLS
-    auth: {
-      user: process.env.BREVO_SMTP_USER,
-      pass: process.env.BREVO_SMTP_PASS,
+  const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'api-key': process.env.BREVO_API_KEY,
+      'Content-Type': 'application/json',
     },
+    body: JSON.stringify({
+      sender: { name: fromName, email: from },
+      to: [{ email: to }],
+      subject,
+      htmlContent: html,
+      textContent: text,
+    }),
   });
 
-  return transporter;
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.message || `Brevo API error: ${res.status}`);
+  }
+
+  return res.json();
 }
 
 // ── Email templates ────────────────────────────────────────────────────────
@@ -112,17 +116,16 @@ function letterArrivedTemplate(nickname, senderName, vehicleEmoji) {
 // ── Public send functions ──────────────────────────────────────────────────
 
 export async function sendVerificationEmail(toEmail, nickname, token) {
-  console.log("📧 Sending verification email via Brevo...");
-  const t = getTransporter();
-  if (!t) return false;
+  console.log("📧 Sending verification email via Brevo API...");
 
   const baseUrl = process.env.FRONTEND_URL || 'https://treedegrees.vercel.app';
   const verifyUrl = `${baseUrl}/verify?token=${token}&email=${encodeURIComponent(toEmail)}`;
   const tmpl = verificationTemplate(nickname, verifyUrl);
 
   try {
-    await t.sendMail({
-      from: '"TreeDegrees 🌳" <tree3degrees@gmail.com>',
+    await sendMail({
+      from: 'tree3degrees@gmail.com',
+      fromName: 'TreeDegrees 🌳',
       to: toEmail,
       subject: tmpl.subject,
       html: tmpl.html,
@@ -137,12 +140,11 @@ export async function sendVerificationEmail(toEmail, nickname, token) {
 }
 
 export async function sendLetterArrivedEmail(toEmail, nickname, senderName, vehicleEmoji) {
-  const t = getTransporter();
-  if (!t) return false;
   const tmpl = letterArrivedTemplate(nickname, senderName, vehicleEmoji);
   try {
-    await t.sendMail({
-      from: '"TreeDegrees 🌳" <noreply@treedegrees.com>',
+    await sendMail({
+      from: 'tree3degrees@gmail.com',
+      fromName: 'TreeDegrees 🌳',
       to: toEmail,
       subject: tmpl.subject,
       html: tmpl.html,
