@@ -15,6 +15,7 @@ import adminRoutes from './routes/admin.js';
 import { requireAuth } from './middleware/auth.js';
 import pool from './db/pool.js';
 import { verifyToken } from './utils/auth.js';
+import { sendVerificationEmail } from './utils/email.js';
 
 dotenv.config();
 
@@ -136,6 +137,30 @@ app.use('/api/users',     apiLimiter,  usersRoutes);
 app.use('/api/nicknames', apiLimiter,  nicknamesRoutes);
 app.use('/api/letters',   apiLimiter,  lettersRoutes);
 app.use('/api/admin',     apiLimiter,  adminRoutes);
+
+// ── TEST EMAIL ROUTE ─────────────────────────────────────────────
+app.get('/test-email', async (req, res) => {
+  console.log("🧪 TEST EMAIL ROUTE HIT");
+
+  try {
+    const ok = await sendVerificationEmail(
+      "scamperedcraft@gmail.com",
+      "TestUser",
+      "123456"
+    );
+
+    if (ok) {
+      console.log("✅ Email function returned true");
+      return res.send("✅ Email sent successfully");
+    } else {
+      console.log("❌ Email function returned false");
+      return res.send("❌ Failed to send email. Check logs.");
+    }
+  } catch (err) {
+    console.error("💥 TEST ROUTE ERROR:", err);
+    return res.status(500).send("Server error");
+  }
+});
 
 // ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
