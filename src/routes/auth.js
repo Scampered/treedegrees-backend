@@ -7,8 +7,8 @@ import {
   generateFriendCode, isValidEmail, isStrongPassword,
 } from '../utils/auth.js';
 import { containsProfanity, profanityError } from '../utils/profanity.js';
-import { sendVerificationEmail } from '../utils/email.js';
 import { requireAuth } from '../middleware/auth.js';
+import { sendVerificationEmail, sendEmailChangeEmail } from '../utils/email.js';
 
 const router = Router();
 
@@ -256,6 +256,103 @@ router.delete('/account', requireAuth, async (req, res) => {
     res.json({ message: 'Account deleted successfully' });
   } catch (err) {
     console.error('Delete account error:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── POST /api/auth/request-email-change ──────────────────────────────────────
+// User submits new email + current password → sends confirmation to NEW email
+router.post('/request-email-change', requireAuth, async (req, res) => {
+  try {
+    const { newEmail, password } = req.body;
+
+    if (!newEmail || !password)
+      return res.status(400).json({ error: 'New email and password are required' });
+    if (!isValidEmail(newEmail))
+      return res.status(400).json({ error: 'Invalid email address' });
+
+    // Verify password
+    const { rows: userRows } = await pool.query(
+      'SELECT password_hash, nickname, email FROM users WHERE id = $1 AND deleted_at IS NULL',
+      [req.user.id]
+    );
+    if (userRows.length === 0) return res.status(404).json({ error: 'User not found' });
+
+    const valid = await verifyPassword(password, userRows[0].password_hash);
+    if (!valid) return res.status(401).json({ error: 'Incorrect password' });
+
+    // Make sure new email isn't already taken
+    const { rows: existing } = await pool.query(
+      'SELECT id FROM users WHERE email = $1 AND deleted_at IS NULL AND id != $2',
+      [newEmail.toLowerCase().trim(), req.user.id]
+    );
+    if (existing.length > 0)
+      return res.status(409).json({ error: 'This email is already in use' });
+
+    // Store pending email + token on the user row
+    const changeToken   = makeVerifyToken();
+    const changeExpires = new Date(Date.now() + 24 * 3600 * 1000);
+
+    await pool.query(
+      `UPDATE users SET
+        pending_email = $1,
+        email_verify_token = $2,
+        email_verify_expires = $3
+       WHERE id = $4`,
+      [newEmail.toLowerCase().trim(), changeToken, changeExpires, req.user.id]
+    );
+
+    // Send confirmation to the NEW email address
+    await sendEmailChangeEmail(
+      newEmail.toLowerCase().trim(),
+      userRows[0].nickname,
+      changeToken,
+      newEmail
+    );
+
+    res.json({ message: 'Confirmation email sent to your new address. Click the link to confirm.' });
+  } catch (err) {
+    console.error('Request email change error:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── GET /api/auth/confirm-email-change?token=...&email=... ───────────────────
+// User clicks link in new email → swap email in DB
+router.get('/confirm-email-change', async (req, res) => {
+  try {
+    const { token, email } = req.query;
+    if (!token || !email)
+      return res.status(400).json({ error: 'Invalid link' });
+
+    const { rows } = await pool.query(
+      `SELECT id, pending_email FROM users
+       WHERE email_verify_token = $1
+         AND email_verify_expires > NOW()
+         AND pending_email IS NOT NULL
+         AND deleted_at IS NULL`,
+      [token]
+    );
+
+    if (rows.length === 0)
+      return res.status(400).json({ error: 'Link is invalid or has expired' });
+
+    const { id, pending_email } = rows[0];
+
+    await pool.query(
+      `UPDATE users SET
+        email = $1,
+        pending_email = NULL,
+        email_verify_token = NULL,
+        email_verify_expires = NULL,
+        email_verified = true
+       WHERE id = $2`,
+      [pending_email, id]
+    );
+
+    res.json({ confirmed: true, message: 'Email updated successfully' });
+  } catch (err) {
+    console.error('Confirm email change error:', err.message);
     res.status(500).json({ error: 'Server error' });
   }
 });

@@ -75,6 +75,49 @@ function verificationTemplate(nickname, verifyUrl) {
   };
 }
 
+function emailChangeTemplate(nickname, verifyUrl, newEmail) {
+  return {
+    subject: '🌳 Confirm your new TreeDegrees email',
+    html: `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"></head>
+<body style="margin:0;padding:0;background:#082208;font-family:'Segoe UI',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#082208;padding:40px 20px;">
+    <tr><td align="center">
+      <table width="480" cellpadding="0" cellspacing="0" style="background:#0d2b0d;border-radius:16px;border:1px solid #196219;overflow:hidden;max-width:100%;">
+        <tr><td style="background:#113f11;padding:24px 32px;text-align:center;">
+          <p style="margin:0;font-size:28px;">🌳</p>
+          <h1 style="margin:8px 0 0;color:#80d580;font-size:22px;font-weight:700;">TreeDegrees</h1>
+        </td></tr>
+        <tr><td style="padding:32px;">
+          <p style="color:#c0e0c0;font-size:16px;margin:0 0 8px;">Hi ${nickname || 'there'},</p>
+          <p style="color:#80a080;font-size:14px;margin:0 0 24px;line-height:1.6;">
+            You requested to change your email to <strong style="color:#c0e0c0;">${newEmail}</strong>.<br/>
+            Click the button below to confirm this change.
+          </p>
+          <div style="text-align:center;margin:32px 0;">
+            <a href="${verifyUrl}"
+               style="background:#1f7e1f;color:#e0ffe0;text-decoration:none;padding:14px 32px;border-radius:50px;font-size:15px;font-weight:600;display:inline-block;">
+              ✅ Confirm new email
+            </a>
+          </div>
+          <p style="color:#4d7a4d;font-size:12px;text-align:center;margin:0;">
+            This link expires in 24 hours. If you didn't request this, you can ignore this email.
+          </p>
+        </td></tr>
+        <tr><td style="background:#082208;padding:16px 32px;text-align:center;border-top:1px solid #196219;">
+          <p style="color:#2d5a2d;font-size:11px;margin:0;">🌳 TreeDegrees · Your social graph, your way</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`,
+    text: `Hi ${nickname || 'there'},\n\nConfirm your new email (${newEmail}) by clicking: ${verifyUrl}\n\nThis link expires in 24 hours.\n\nTreeDegrees`,
+  };
+}
+
 function letterArrivedTemplate(nickname, senderName, vehicleEmoji) {
   return {
     subject: `${vehicleEmoji} A letter arrived from ${senderName} — TreeDegrees`,
@@ -153,6 +196,30 @@ export async function sendLetterArrivedEmail(toEmail, nickname, senderName, vehi
     return true;
   } catch (err) {
     console.error('Letter email error:', err.message);
+    return false;
+  }
+}
+
+export async function sendEmailChangeEmail(toEmail, nickname, token, newEmail) {
+  console.log("📧 Sending email change confirmation via Brevo API...");
+
+  const baseUrl = process.env.FRONTEND_URL || 'https://treedegrees.vercel.app';
+  const verifyUrl = `${baseUrl}/verify-email-change?token=${token}&email=${encodeURIComponent(toEmail)}`;
+  const tmpl = emailChangeTemplate(nickname, verifyUrl, newEmail);
+
+  try {
+    await sendMail({
+      from: 'tree3degrees@gmail.com',
+      fromName: 'TreeDegrees 🌳',
+      to: toEmail,
+      subject: tmpl.subject,
+      html: tmpl.html,
+      text: tmpl.text,
+    });
+    console.log(`✅ Email change confirmation sent to ${toEmail}`);
+    return true;
+  } catch (err) {
+    console.error('Email change send error:', err.message);
     return false;
   }
 }
