@@ -1,13 +1,12 @@
-// src/utils/letters.js — vehicle tiers, delivery time, streak calculation
+// src/utils/letters.js
 
-// ── Vehicle tiers ─────────────────────────────────────────────────────────────
 export const VEHICLE_TIERS = {
-  car:       { minStreak: 0,   maxHours: 20,  emoji: '🚗',  label: 'Car'           },
-  sportscar: { minStreak: 16,  maxHours: 10,  emoji: '🏎️',  label: 'Sports Car'    },
-  airliner:  { minStreak: 32,  maxHours: 5,   emoji: '✈️',  label: 'Airliner'      },
-  jet:       { minStreak: 64,  maxHours: 2.5, emoji: '🛩️',  label: 'Jet'           },
-  spaceship: { minStreak: 128, maxHours: 1,   emoji: '🚀',  label: 'Spaceship'     },
-  radio:     { minStreak: 256, maxHours: 0,   emoji: '📡',  label: 'Radio'         },
+  car:       { minStreak: 0,   maxHours: 20,  emoji: '🚗',  label: 'Car'        },
+  sportscar: { minStreak: 16,  maxHours: 10,  emoji: '🏎️',  label: 'Sports Car' },
+  airliner:  { minStreak: 32,  maxHours: 5,   emoji: '✈️',  label: 'Airliner'   },
+  jet:       { minStreak: 64,  maxHours: 2.5, emoji: '🛩️',  label: 'Jet'        },
+  spaceship: { minStreak: 128, maxHours: 1,   emoji: '🚀',  label: 'Spaceship'  },
+  radio:     { minStreak: 256, maxHours: 0,   emoji: '📡',  label: 'Radio'      },
 }
 
 export function getVehicleTier(streakDays) {
@@ -24,7 +23,7 @@ export function nextVehicleMilestone(streakDays) {
   return milestones.find(m => m > streakDays) || null
 }
 
-// ── Haversine distance ────────────────────────────────────────────────────────
+// ── Haversine ─────────────────────────────────────────────────────────────────
 const MAX_EARTH_KM = 20037
 
 export function haversineKm(lat1, lon1, lat2, lon2) {
@@ -43,23 +42,45 @@ export function calcDeliveryMs(distKm, vehicleTier) {
   if (vehicleTier === 'radio') return 0
   const { maxHours } = VEHICLE_TIERS[vehicleTier]
   const ratio = Math.min(distKm / MAX_EARTH_KM, 1)
-  // Minimum 30 seconds so very close users still get an animation
   return Math.max(30000, ratio * maxHours * 3600 * 1000)
 }
 
-// ── Streak lazy calculation ───────────────────────────────────────────────────
-// No cron needed — we calculate missed days when the streak is fetched.
-export function calculateEffectiveStreak(record) {
+// ── Streak — uses SENDER'S local date (passed in from client) ─────────────────
+//
+// Rules:
+// - A "day" is defined by the SENDER's local midnight (client sends their date string)
+// - Both users must send at least one letter each on the same local day to grow streak
+// - Sending a letter adds +1 fuel (max 3)
+// - Each elapsed day costs 1 fuel
+// - If fuel hits 0, streak resets
+// - If 1 fuel left, show ⌛ warning on frontend
+//
+// The record stores:
+//   sender_local_date_1 — the date string (YYYY-MM-DD) in user1's local time when they last sent
+//   sender_local_date_2 — same for user2
+//   current_period     — the "day key" of the current active period (first sender's date that day)
+//
+// For simplicity we store the local date of the FIRST sender each day in current_period.
+// When user2 sends on the same local date as user1's current_period, both-sent = true.
+
+export function calculateEffectiveStreak(record, todayStr) {
+  // todayStr: caller passes the CURRENT date in whatever timezone is relevant
+  // For lazy evaluation (no active sender), we use UTC date
+  const today = todayStr || new Date().toISOString().split('T')[0]
+
   if (!record) {
-    return { streak_days: 0, fuel: 0, user1_sent_today: false, user2_sent_today: false }
+    return {
+      streak_days: 0, fuel: 0,
+      user1_sent_today: false, user2_sent_today: false,
+      last_day_processed: today,
+    }
   }
 
-  const today = new Date().toISOString().split('T')[0]
   const lastProcessed = record.last_day_processed instanceof Date
     ? record.last_day_processed.toISOString().split('T')[0]
     : String(record.last_day_processed || today)
 
-  if (lastProcessed === today) return record // already up to date for today
+  if (lastProcessed === today) return record
 
   let { streak_days, fuel, user1_sent_today, user2_sent_today } = record
 
@@ -67,13 +88,12 @@ export function calculateEffectiveStreak(record) {
     (new Date(today) - new Date(lastProcessed)) / 86400000
   ))
 
-  // Process each elapsed day
   for (let i = 0; i < daysDiff; i++) {
     if (i === 0) {
-      // This was yesterday — did both send?
+      // Yesterday's resolution: if both sent, increment streak
       if (user1_sent_today && user2_sent_today) streak_days += 1
     }
-    // Each day costs 1 fuel
+    // Each elapsed day burns 1 fuel
     fuel = Math.max(0, fuel - 1)
     if (fuel === 0) streak_days = 0
     user1_sent_today = false
@@ -82,16 +102,13 @@ export function calculateEffectiveStreak(record) {
 
   return {
     ...record,
-    streak_days,
-    fuel,
-    user1_sent_today,
-    user2_sent_today,
+    streak_days, fuel,
+    user1_sent_today, user2_sent_today,
     last_day_processed: today,
-    _dirty: true, // flag to write back to DB
+    _dirty: true,
   }
 }
 
-// ── Time formatting ───────────────────────────────────────────────────────────
 export function formatDuration(ms) {
   if (ms <= 0) return 'Instant'
   const h = Math.floor(ms / 3600000)

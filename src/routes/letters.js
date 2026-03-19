@@ -106,14 +106,26 @@ router.post('/', requireAuth, async (req, res) => {
       [req.user.id, recipientId, content.trim(), tier, arrivesAt, expiresAt, streak.streak_days]
     );
 
-    const today    = new Date().toISOString().split('T')[0];
+    // Use sender's local date so streak day boundaries respect their timezone
+    const senderLocalDate = req.body.senderLocalDate || new Date().toISOString().split('T')[0];
     const isUser1  = req.user.id === uid1;
-    const newFuel  = Math.min(3, (streak.fuel || 0) + 1);
+
+    // Re-evaluate streak from sender's local date perspective
+    const freshStreak = calculateEffectiveStreak(raw, senderLocalDate);
+
+    // Only add fuel if this sender hasn't sent today yet (prevents farming fuel
+    // by sending multiple letters in one day)
+    const alreadySentToday = isUser1 ? freshStreak.user1_sent_today : freshStreak.user2_sent_today;
+    const newFuel = alreadySentToday
+      ? freshStreak.fuel
+      : Math.min(3, (freshStreak.fuel || 0) + 1);
+
     await upsertStreak(client, uid1, uid2, {
-      streak_days: streak.streak_days, fuel: newFuel,
-      last_day_processed: today,
-      user1_sent_today: isUser1 ? true : (streak.user1_sent_today || false),
-      user2_sent_today: !isUser1 ? true : (streak.user2_sent_today || false),
+      streak_days: freshStreak.streak_days,
+      fuel: newFuel,
+      last_day_processed: senderLocalDate,
+      user1_sent_today: isUser1 ? true : (freshStreak.user1_sent_today || false),
+      user2_sent_today: !isUser1 ? true : (freshStreak.user2_sent_today || false),
     });
 
     res.status(201).json({
@@ -123,7 +135,7 @@ router.post('/', requireAuth, async (req, res) => {
       deliveryTime: formatDuration(deliveryMs),
       distanceKm: Math.round(distKm),
       recipient: { id: recipient.id, displayName: recipient.display_name, city: recipient.city },
-      streak: { days: streak.streak_days, fuel: newFuel, tier },
+      streak: { days: freshStreak.streak_days, fuel: newFuel, tier },
     });
   } catch (err) {
     console.error('Send letter error:', err.message);
@@ -150,7 +162,7 @@ router.get('/', requireAuth, async (req, res) => {
        JOIN users ru ON l.recipient_id = ru.id
        WHERE (l.sender_id=$1 OR l.recipient_id=$1)
          AND (l.expires_at IS NULL OR l.expires_at > NOW())
-       ORDER BY l.sent_at DESC
+       ORDER BY l.arrives_at DESC, l.sent_at DESC
        LIMIT 200`,
       [req.user.id]
     );

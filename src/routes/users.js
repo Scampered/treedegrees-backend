@@ -128,7 +128,7 @@ router.get('/feed', requireAuth, async (req, res) => {
          AND u.deleted_at IS NULL
          AND u.daily_note IS NOT NULL
          AND u.daily_note != ''
-         AND u.daily_note_updated_at > NOW() - INTERVAL '72 hours'
+         AND u.daily_note_updated_at > NOW() - INTERVAL '24 hours'
        ORDER BY u.daily_note_updated_at DESC`,
       [req.user.id]
     );
