@@ -17,6 +17,7 @@ router.get('/', requireAuth, async (req, res) => {
     const { rows } = await pool.query(
       `SELECT
         u.id, u.full_name, u.nickname, u.city, u.country, u.latitude, u.longitude,
+        u.location_privacy,
         u.friend_code, u.bio, u.is_public, u.connections_public,
         u.daily_note, u.daily_note_updated_at,
         f.id AS friendship_id, f.created_at AS connected_since,
@@ -34,27 +35,41 @@ router.get('/', requireAuth, async (req, res) => {
       [req.user.id]
     );
 
+    const now = Date.now();
     res.json(rows.map(u => {
       const myPrivate = u.user_id_1 === req.user.id ? u.private_for_user1 : u.private_for_user2;
       // Priority: my personal nickname > their own nickname > first name — never full name
       const displayName = u.my_nickname || u.nickname || u.full_name?.split(' ')[0] || '?';
+
+      // Only show city if location is exact — hide it for private/hidden location settings
+      const locationPrivacy = u.location_privacy || 'exact';
+      const showExactCity = locationPrivacy === 'exact';
+
+      // Notes only shown if posted within the last 24 hours (direct connections always)
+      const noteAge = u.daily_note_updated_at
+        ? (now - new Date(u.daily_note_updated_at).getTime())
+        : Infinity;
+      const freshNote = noteAge < 86400000 ? u.daily_note : null;
+      const freshNoteDate = noteAge < 86400000 ? u.daily_note_updated_at : null;
+
       return {
         id: u.id,
         friendshipId: u.friendship_id,
         displayName,
         myNickname: u.my_nickname || null,
         fullName: null, // never expose full name to frontend
-        city: u.city,
+        city: showExactCity ? u.city : null,     // hide city if approximate/hidden
         country: u.country,
         latitude: u.latitude,
         longitude: u.longitude,
+        locationPrivacy,
         friendCode: u.friend_code,
-        bio: u.is_public ? u.bio : null,
+        bio: u.bio,                              // direct friends always see bio
         isPublic: u.is_public,
-        dailyNote: u.is_public ? u.daily_note : null,
-        dailyNoteUpdatedAt: u.is_public ? u.daily_note_updated_at : null,
+        dailyNote: freshNote,                    // null if older than 24h
+        dailyNoteUpdatedAt: freshNoteDate,
         connectedSince: u.connected_since,
-        isPrivate: myPrivate, // MY setting for this friendship
+        isPrivate: myPrivate,
       };
     }));
   } catch (err) {

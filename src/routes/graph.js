@@ -201,28 +201,44 @@ router.get('/map', requireAuth, async (req, res) => {
         lat = coords.lat; lon = coords.lon; isApproximate = coords.isApproximate;
       }
 
-      // Nickname resolution
-      const resolvedNickname = hiddenByPrivateLink ? '?' : resolveNickname(u.id, degree);
+      // Private profile means this person appears as "?" to anyone who is NOT
+      // a direct connection (degree 1) — even if they are in the graph.
+      const isPrivateToViewer = !isMe && !myFriendIds.has(u.id) && !u.is_public;
+      const effectivelyHidden = hiddenByPrivateLink || isPrivateToViewer;
 
-      // Full name: visible to self, direct friends, or public profile (if not "?")
-      const canSeeFullName = isMe || myFriendIds.has(u.id) || (u.is_public && !hiddenByPrivateLink);
+      // Nickname — "?" for hidden nodes, propagated/own nick for visible
+      const resolvedNickname = effectivelyHidden ? '?' : resolveNickname(u.id, degree);
 
-      // Notes: visible to direct friends always, public profiles if not "?"
-      const canSeeNote = !isMe && (myFriendIds.has(u.id) || (u.is_public && !hiddenByPrivateLink));
+      // Full name — ONLY self or direct friends. Never for public profiles.
+      const canSeeFullName = isMe || myFriendIds.has(u.id);
+
+      // Notes — ONLY direct friends, AND only if posted within the last 24 hours
+      const noteAge = u.daily_note_updated_at
+        ? (Date.now() - new Date(u.daily_note_updated_at).getTime())
+        : Infinity;
+      const noteIsFresh = noteAge < 86400000; // 24 hours in ms
+      const canSeeNote = !isMe && myFriendIds.has(u.id) && noteIsFresh;
+
+      // City — hide exact city when location is private/hidden (show country only)
+      const locationIsApprox = isApproximate || effectivelyHidden;
+      const displayCity = effectivelyHidden
+        ? null
+        : (isApproximate ? null : u.city);
 
       return {
         id: u.id,
         degree,
         latitude: lat,
         longitude: lon,
-        locationPrivacy: isApproximate,
-        hiddenByPrivateLink,
-        city: hiddenByPrivateLink ? u.country : u.city,
+        locationPrivacy: locationIsApprox,
+        hiddenByPrivateLink: effectivelyHidden,
+        city: displayCity,
         country: u.country,
         nickname: resolvedNickname,
         fullName: canSeeFullName ? u.full_name : null,
         isPublic: u.is_public,
         dailyNote: canSeeNote ? u.daily_note : null,
+        hasNote: !isMe && myFriendIds.has(u.id) && !!u.daily_note && noteIsFresh,
       };
     });
 
