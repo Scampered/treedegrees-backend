@@ -517,19 +517,87 @@ router.post('/:id/start', requireAuth, async (req, res) => {
 
 // GET /api/games/:id — get game state (player-filtered)
 router.get('/:id', requireAuth, async (req, res) => {
+  const client = await pool.connect();
   try {
-    const { rows: [game] } = await pool.query(
-      `SELECT game_state, status FROM trump_card_games WHERE id=$1`, [req.params.id]
+    const { rows: [game] } = await client.query(
+      `SELECT tcg.game_state, tcg.status, tcg.created_at, tcg.created_by,
+              g.name AS group_name
+       FROM trump_card_games tcg
+       JOIN groups g ON g.id = tcg.group_id
+       WHERE tcg.id=$1`, [req.params.id]
     );
     if (!game) return res.status(404).json({ error: 'Game not found' });
+
+    // Auto-expire waiting lobbies after 2 minutes
+    if (game.status === 'waiting') {
+      const ageMs = Date.now() - new Date(game.created_at).getTime();
+      if (ageMs > 120000) {
+        await client.query(
+          `UPDATE trump_card_games SET status='ended', updated_at=NOW() WHERE id=$1`,
+          [req.params.id]
+        );
+        return res.json({ status: 'ended', expired: true, groupName: game.group_name,
+          turnPhase: 'ended', players: [], myPlayerIndex: -1, myHand: [],
+          playZone: [], deckCount: 0, log: [{ text: 'Lobby expired after 2 minutes.', ts: Date.now() }],
+          winner: null });
+      }
+    }
+
     const state = game.game_state;
-    const { rows: players } = await pool.query(
+    const { rows: players } = await client.query(
       `SELECT user_id, seat_index FROM trump_card_players WHERE game_id=$1`, [req.params.id]
     );
-    res.json(playerView(state, req.user.id, players));
+    const view = playerView(state, req.user.id, players);
+    view.groupName = game.group_name;
+    view.createdBy = game.created_by;
+    res.json(view);
   } catch (err) {
     console.error(err.message);
     res.status(500).json({ error: 'Server error' });
+  } finally {
+    client.release();
+  }
+});
+
+// DELETE /api/games/:id/lobby — leave or close lobby
+router.delete('/:id/lobby', requireAuth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: [game] } = await client.query(
+      `SELECT * FROM trump_card_games WHERE id=$1 FOR UPDATE`, [req.params.id]
+    );
+    if (!game) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
+    if (game.status !== 'waiting') { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Game already started' }); }
+
+    if (game.created_by === req.user.id) {
+      // Admin: close the whole lobby
+      await client.query(
+        `UPDATE trump_card_games SET status='ended', updated_at=NOW() WHERE id=$1`, [req.params.id]
+      );
+      addLog(game.game_state, 'Lobby closed by host.');
+      await client.query('COMMIT');
+      return res.json({ closed: true });
+    } else {
+      // Non-admin: just remove themselves
+      await client.query(
+        `DELETE FROM trump_card_players WHERE game_id=$1 AND user_id=$2`, [req.params.id, req.user.id]
+      );
+      const state = game.game_state;
+      state.players = state.players.filter(p => p.userId !== req.user.id);
+      await client.query(
+        `UPDATE trump_card_games SET game_state=$1, updated_at=NOW() WHERE id=$2`,
+        [JSON.stringify(state), req.params.id]
+      );
+      await client.query('COMMIT');
+      return res.json({ left: true });
+    }
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err.message);
+    res.status(500).json({ error: 'Server error' });
+  } finally {
+    client.release();
   }
 });
 
