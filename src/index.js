@@ -13,6 +13,7 @@ import nicknamesRoutes from './routes/nicknames.js';
 import lettersRoutes from './routes/letters.js';
 import adminRoutes from './routes/admin.js';
 import groupsRoutes from './routes/groups.js';
+import gamesRoutes from './routes/games.js';
 import { requireAuth } from './middleware/auth.js';
 import pool from './db/pool.js';
 import { verifyToken } from './utils/auth.js';
@@ -138,6 +139,7 @@ app.use('/api/nicknames', apiLimiter,  nicknamesRoutes);
 app.use('/api/letters',   apiLimiter,  lettersRoutes);
 app.use('/api/admin',     apiLimiter,  adminRoutes);
 app.use('/api/groups',    apiLimiter,  groupsRoutes);
+app.use('/api/games',     apiLimiter,  gamesRoutes);
 
 // ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
