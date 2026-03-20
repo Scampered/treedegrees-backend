@@ -113,16 +113,11 @@ router.post('/', requireAuth, async (req, res) => {
     // Re-evaluate streak from sender's local date perspective
     const freshStreak = calculateEffectiveStreak(raw, senderLocalDate);
 
-    // Only add fuel if this sender hasn't sent today yet (prevents farming fuel
-    // by sending multiple letters in one day)
-    const alreadySentToday = isUser1 ? freshStreak.user1_sent_today : freshStreak.user2_sent_today;
-    const newFuel = alreadySentToday
-      ? freshStreak.fuel
-      : Math.min(3, (freshStreak.fuel || 0) + 1);
-
+    // Mark sender as "sent today" — fuel is added when the letter ARRIVES, not now
+    // This prevents fuel farming and correctly rewards actual delivery
     await upsertStreak(client, uid1, uid2, {
       streak_days: freshStreak.streak_days,
-      fuel: newFuel,
+      fuel: freshStreak.fuel, // unchanged at send time
       last_day_processed: senderLocalDate,
       user1_sent_today: isUser1 ? true : (freshStreak.user1_sent_today || false),
       user2_sent_today: !isUser1 ? true : (freshStreak.user2_sent_today || false),
@@ -135,7 +130,7 @@ router.post('/', requireAuth, async (req, res) => {
       deliveryTime: formatDuration(deliveryMs),
       distanceKm: Math.round(distKm),
       recipient: { id: recipient.id, displayName: recipient.display_name, city: recipient.city },
-      streak: { days: freshStreak.streak_days, fuel: newFuel, tier },
+      streak: { days: freshStreak.streak_days, fuel: freshStreak.fuel, tier },
     });
   } catch (err) {
     console.error('Send letter error:', err.message);
@@ -294,6 +289,44 @@ router.get('/streaks', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('Streaks error:', err.message);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
+// ── PATCH /api/letters/:id/arrived — fuel+1 when letter reaches recipient ────
+// Called by the frontend when the letter's arrivesAt timestamp is crossed
+router.patch('/:id/arrived', requireAuth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    // Verify this letter exists and the viewer is the RECIPIENT
+    const { rows: [letter] } = await client.query(
+      `SELECT sender_id, recipient_id, arrives_at FROM letters
+       WHERE id=$1 AND recipient_id=$2 AND arrives_at <= NOW()`,
+      [req.params.id, req.user.id]
+    );
+    if (!letter) return res.status(404).json({ error: 'Letter not found or not yet arrived' });
+
+    const [uid1, uid2] = [letter.sender_id, letter.recipient_id].sort();
+    const raw = await getStreak(client, letter.sender_id, letter.recipient_id);
+    const today = new Date().toLocaleDateString('sv-SE');
+    const streak = calculateEffectiveStreak(raw, today);
+
+    // Add +1 fuel on arrival (capped at 3)
+    const newFuel = Math.min(3, (streak.fuel || 0) + 1);
+    await upsertStreak(client, uid1, uid2, {
+      streak_days: streak.streak_days,
+      fuel: newFuel,
+      last_day_processed: streak.last_day_processed || today,
+      user1_sent_today: streak.user1_sent_today || false,
+      user2_sent_today: streak.user2_sent_today || false,
+    });
+
+    res.json({ fuel: newFuel, streakDays: streak.streak_days });
+  } catch (err) {
+    console.error('Arrived error:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  } finally {
+    client.release();
   }
 });
 
