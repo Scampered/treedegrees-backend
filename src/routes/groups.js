@@ -19,11 +19,12 @@ router.get('/', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT g.id, g.name, g.description, g.color, g.admin_id, g.created_at,
-              COUNT(DISTINCT gm2.user_id) FILTER (WHERE gm2.status='accepted') AS member_count
+              COUNT(DISTINCT gm2.user_id) FILTER (WHERE gm2.status='accepted') AS member_count,
+              gm.muted
        FROM groups g
        JOIN group_members gm ON gm.group_id = g.id AND gm.user_id = $1 AND gm.status = 'accepted'
        LEFT JOIN group_members gm2 ON gm2.group_id = g.id
-       GROUP BY g.id ORDER BY g.created_at DESC`,
+       GROUP BY g.id, gm.muted ORDER BY g.created_at DESC`,
       [req.user.id]
     );
     res.json(rows.map(g => ({
@@ -31,6 +32,7 @@ router.get('/', requireAuth, async (req, res) => {
       color: g.color, adminId: g.admin_id,
       memberCount: parseInt(g.member_count) || 0,
       isAdmin: g.admin_id === req.user.id,
+      muted: g.muted || false,
       createdAt: g.created_at,
     })));
   } catch (err) {
@@ -469,6 +471,19 @@ router.patch('/letters/:letterId/open', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
+// ── PATCH /api/groups/:id/mute — toggle mute ──────────────────────────────────
+router.patch('/:id/mute', requireAuth, async (req, res) => {
+  try {
+    const { muted } = req.body;
+    const { rowCount } = await pool.query(
+      `UPDATE group_members SET muted=$1 WHERE group_id=$2 AND user_id=$3 AND status='accepted'`,
+      [!!muted, req.params.id, req.user.id]
+    );
+    if (rowCount === 0) return res.status(404).json({ error: 'Not a member' });
+    res.json({ muted: !!muted });
+  } catch (err) { res.status(500).json({ error: 'Server error' }); }
+});
+
 // ── GET /api/groups/notifications ─────────────────────────────────────────────
 router.get('/notifications', requireAuth, async (req, res) => {
   try {
@@ -489,7 +504,7 @@ router.get('/notifications', requireAuth, async (req, res) => {
       );
     }
 
-    // New group invites
+    // New group invites + recent group letters (not muted)
     const { rows: inviteRows } = await pool.query(
       `SELECT gm.group_id, g.name AS group_name,
               COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS inviter_name
@@ -501,9 +516,27 @@ router.get('/notifications', requireAuth, async (req, res) => {
       [req.user.id]
     );
 
+    // New group letters arrived in last 60s (for members who are not muted)
+    const { rows: groupLetterRows } = await pool.query(
+      `SELECT gl.group_id, g.name AS group_name, g.color,
+              COALESCE(su.nickname, split_part(su.full_name,' ',1)) AS sender_name
+       FROM group_letter_deliveries gld
+       JOIN group_letters gl ON gld.letter_id = gl.id
+       JOIN groups g ON g.id = gl.group_id
+       JOIN users su ON gl.sender_id = su.id
+       JOIN group_members gm ON gm.group_id = gl.group_id AND gm.user_id = $1
+       WHERE gld.recipient_id = $1
+         AND gld.arrives_at > NOW() - INTERVAL '60 seconds'
+         AND gld.arrives_at <= NOW()
+         AND gm.muted = false
+       LIMIT 5`,
+      [req.user.id]
+    );
+
     res.json({
       friendRequests: reqRows.map(r => ({ friendshipId: r.id, fromName: r.from_name })),
       groupInvites: inviteRows.map(r => ({ groupId: r.group_id, groupName: r.group_name, inviterName: r.inviter_name })),
+      groupLetters: groupLetterRows.map(r => ({ groupId: r.group_id, groupName: r.group_name, senderName: r.sender_name, color: r.color })),
     });
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
