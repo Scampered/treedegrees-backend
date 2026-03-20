@@ -232,9 +232,23 @@ function processAction(state, type, payload, userId) {
       return { ok: false, error: 'Invalid redirect target' };
     state.pendingDivert = null;
     state.targetPlayerIndex = newTargetIdx;
+    state.turnPhase = 'defending'; // back to defending for new target
     state.defenseDeadline = new Date(Date.now() + 30000).toISOString();
     addLog(state, `↩️ ${me.name} diverts the attack to ${newTarget.name}!`);
-    notify(state, newTargetIdx, `↩️ ${me.name} has diverted an attack to you! ATK: ${state.attackTotal}. Defend now!`);
+    notify(state, newTargetIdx, `↩️ ${me.name} has diverted the attack to you! ATK: ${state.attackTotal}. You have 30s to defend.`);
+    return { ok: true };
+  }
+
+  // ── Cancel divert — give original defender their card back (it was already removed) ──
+  // Just restores the phase so they can still take damage normally
+  if (type === 'cancel_divert') {
+    if (!state.pendingDivert || state.pendingDivert.defenderIdx !== myIdx)
+      return { ok: false, error: 'No divert to cancel' };
+    state.pendingDivert = null;
+    state.targetPlayerIndex = myIdx; // back to being the defender
+    state.turnPhase = 'defending';
+    state.defenseDeadline = new Date(Date.now() + 20000).toISOString(); // shorter since they used time
+    addLog(state, `↩️ ${me.name} cancelled the divert — will defend normally.`);
     return { ok: true };
   }
 
@@ -318,7 +332,7 @@ function processAction(state, type, payload, userId) {
 
   // ── Defend ────────────────────────────────────────────────────────────────
   if (type === 'defend' || type === 'skip_defense') {
-    if (state.turnPhase !== 'defending') return { ok: false, error: 'Not defense phase' };
+    if (state.turnPhase !== 'defending' && state.turnPhase !== 'diverting') return { ok: false, error: 'Not defense phase' };
 
     if (type === 'skip_defense' && !isTarget) {
       // Only allowed after deadline for non-defenders
@@ -339,8 +353,16 @@ function processAction(state, type, payload, userId) {
       const { cardUids } = payload;
       const cards = (cardUids || []).map(uid => defender.hand.find(c => c.uid === uid)).filter(Boolean);
 
-      // Divert Attack — player chooses who to redirect to
-      if (cards.length === 1 && cards[0].id === 'divert_attack') {
+      // Call Reinforcements on defense — draw 2, then take full damage (0 DEF)
+      if (cards.length === 1 && cards[0].id === 'call_reinforce') {
+        const idx = defender.hand.findIndex(c => c.uid === cards[0].uid);
+        if (idx >= 0) defender.hand.splice(idx, 1);
+        const drawn = giveCard(state, defMyIdx, 2);
+        addLog(state, `📦 ${defender.name} plays Reinforcements on defense — draws ${drawn} card${drawn!==1?'s':''}!`);
+        notify(state, defMyIdx, `📦 Reinforcements! Drew ${drawn} card${drawn!==1?'s':''}. No defense deployed — you take full damage.`);
+        // defCards stays empty → full damage resolved below
+      // Divert Attack — player picks new target
+      } else if (cards.length === 1 && cards[0].id === 'divert_attack') {
         const idx = defender.hand.findIndex(c => c.uid === cards[0].uid);
         defender.hand.splice(idx, 1);
         state.pendingDivert = { defenderIdx: defMyIdx };
@@ -348,16 +370,15 @@ function processAction(state, type, payload, userId) {
         addLog(state, `↩️ ${defender.name} plays Divert Attack! Choose a new target.`);
         notify(state, defMyIdx, `↩️ Divert Attack played! Click on a player to redirect the attack to them.`);
         return { ok: true, needsDivert: true };
-      }
-
-      // Ordered: slots [0,1] = DEF, slot [2] = counter-attack
-      defCards    = cards.slice(0, 2).filter(c => c.type === 'unit');
-      counterCard = cards[2] || null;
-
-      // Remove selected cards from defender's hand FIRST (before adding back damaged)
-      for (const uid of (cardUids || [])) {
-        const idx = defender.hand.findIndex(c => c.uid === uid);
-        if (idx >= 0) defender.hand.splice(idx, 1);
+      } else {
+        // Normal defense — slots [0,1]=DEF, [2]=counter
+        defCards    = cards.slice(0, 2).filter(c => c.type === 'unit');
+        counterCard = cards[2] || null;
+        // Remove cards from hand before resolving
+        for (const uid of (cardUids || [])) {
+          const idx = defender.hand.findIndex(c => c.uid === uid);
+          if (idx >= 0) defender.hand.splice(idx, 1);
+        }
       }
 
     } else {
