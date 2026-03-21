@@ -9,32 +9,48 @@ const WITHDRAW_FEE = 0.10; // 10% fee on withdrawal
 // ── Award seeds for activity (called internally by other routes) ──────────────
 export async function awardSeeds(userId, amount, reason, client) {
   const db = client || pool;
-  await db.query(
-    `UPDATE users SET seeds = GREATEST(0, COALESCE(seeds, 100) + $1) WHERE id = $2`,
+  // Use RETURNING to get the new value in one round-trip, inside whatever transaction is active
+  const { rows: [updated] } = await db.query(
+    `UPDATE users SET seeds = GREATEST(0, COALESCE(seeds, 0) + $1) WHERE id = $2 RETURNING seeds`,
     [amount, userId]
   );
+  if (!updated) return;
+
+  // Record history snapshot with the actual new value.
+  // Use pool directly so history always commits even if caller rolls back.
+  // We already have the new value so no second SELECT needed.
+  try {
+    await pool.query(
+      `INSERT INTO stock_history (user_id, seeds) VALUES ($1, $2)`,
+      [userId, updated.seeds]
+    );
+    // Async trim — fire and forget
+    pool.query(
+      `DELETE FROM stock_history WHERE user_id=$1 AND id NOT IN (
+         SELECT id FROM stock_history WHERE user_id=$1 ORDER BY sampled_at DESC LIMIT 48
+       )`, [userId]
+    ).catch(() => {});
+  } catch (_) { /* never block the award */ }
 }
 
 // ── Sample current score into history ────────────────────────────────────────
 // Called periodically (or lazily on GET) — stores a snapshot every 3 hours max
 async function maybeSampleHistory(userId) {
+  // Lazy sampler: only fires on /me GET, records baseline every 30min max.
+  // awardSeeds() records a point on every activity, so this mainly catches inactivity.
   const { rows: [last] } = await pool.query(
     `SELECT sampled_at FROM stock_history WHERE user_id=$1 ORDER BY sampled_at DESC LIMIT 1`,
     [userId]
   );
   const nowMs = Date.now();
   const lastMs = last ? new Date(last.sampled_at).getTime() : 0;
-  if (nowMs - lastMs < 3 * 3600 * 1000) return; // less than 3h ago
+  if (nowMs - lastMs < 30 * 60 * 1000) return; // less than 30min ago — skip
 
-  const { rows: [u] } = await pool.query(
-    `SELECT seeds FROM users WHERE id=$1`, [userId]
-  );
+  const { rows: [u] } = await pool.query(`SELECT seeds FROM users WHERE id=$1`, [userId]);
   if (!u) return;
   await pool.query(
-    `INSERT INTO stock_history (user_id, seeds) VALUES ($1, $2)`,
-    [userId, u.seeds]
+    `INSERT INTO stock_history (user_id, seeds) VALUES ($1, $2)`, [userId, u.seeds]
   );
-  // Keep only last 48 samples (6 days at 3h intervals)
   await pool.query(
     `DELETE FROM stock_history WHERE user_id=$1 AND id NOT IN (
        SELECT id FROM stock_history WHERE user_id=$1 ORDER BY sampled_at DESC LIMIT 48
@@ -130,15 +146,17 @@ router.get('/connections', requireAuth, async (req, res) => {
           histMap[id] = histMap[id].slice(-9);
       }
 
-      // If someone has no history yet, synthesise 2 points from current seeds
-      // so the sparkline renders rather than showing "No data yet"
+      // If someone has no history yet, show a flat baseline so chart renders
       for (const r of rows) {
-        if (!histMap[r.id] || histMap[r.id].length < 2) {
+        if (!histMap[r.id] || histMap[r.id].length < 1) {
           const s = parseInt(r.seeds) || 0;
           histMap[r.id] = [
-            { seeds: s, ts: new Date(Date.now() - 3*3600*1000).toISOString() },
+            { seeds: s, ts: new Date(Date.now() - 60*60*1000).toISOString() },
             { seeds: s, ts: new Date().toISOString() },
           ];
+        } else if (histMap[r.id].length < 2) {
+          // Only one point — duplicate it so sparkline has something to render
+          histMap[r.id] = [histMap[r.id][0], histMap[r.id][0]];
         }
       }
     }
@@ -201,6 +219,15 @@ router.post('/invest', requireAuth, async (req, res) => {
     await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [boost, targetId]);
 
     await client.query('COMMIT');
+
+    // Record history snapshots for both parties now that seeds have changed
+    try {
+      const [invRow] = (await pool.query(`SELECT seeds FROM users WHERE id=$1`, [req.user.id])).rows;
+      const [tgtRow] = (await pool.query(`SELECT seeds FROM users WHERE id=$1`, [targetId])).rows;
+      if (invRow) await pool.query(`INSERT INTO stock_history (user_id, seeds) VALUES ($1,$2)`, [req.user.id, invRow.seeds]);
+      if (tgtRow) await pool.query(`INSERT INTO stock_history (user_id, seeds) VALUES ($1,$2)`, [targetId, tgtRow.seeds]);
+    } catch (_) {}
+
     res.json({ ok: true, invested: amt, newBalance: investor.seeds - amt });
   } catch (err) {
     await client.query('ROLLBACK');
