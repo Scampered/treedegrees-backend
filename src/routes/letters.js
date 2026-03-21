@@ -6,6 +6,7 @@ import {
   getVehicleTier, haversineKm, calcDeliveryMs,
   calculateEffectiveStreak, VEHICLE_TIERS, nextVehicleMilestone, formatDuration,
 } from '../utils/letters.js';
+import { awardSeeds } from './grove.js';
 
 const router = Router();
 
@@ -315,17 +316,35 @@ router.patch('/:id/arrived', requireAuth, async (req, res) => {
 
     // Add +1 fuel on arrival (capped at 3)
     const newFuel = Math.min(3, (streak.fuel || 0) + 1);
+
+    // Check if arrival completes a "both sent today" — if so, increment streak now
+    const isRecipUser1 = letter.recipient_id === uid1;
+    const u1SentNow = isRecipUser1 ? true : (streak.user1_sent_today || false);
+    const u2SentNow = !isRecipUser1 ? true : (streak.user2_sent_today || false);
+    const bothSentNow = u1SentNow && u2SentNow;
+    // Only increment if we weren't already both-sent (prevent double-increment)
+    const wasAlreadyBothSent = (streak.user1_sent_today || false) && (streak.user2_sent_today || false);
+    const newStreakDays = (bothSentNow && !wasAlreadyBothSent)
+      ? (streak.streak_days || 0) + 1
+      : (streak.streak_days || 0);
+
     // Award seeds to recipient for receiving a letter
     await awardSeeds(letter.recipient_id, 30, 'receive_letter', client);
+    // Bonus seeds for streak milestone
+    if (bothSentNow && !wasAlreadyBothSent) {
+      await awardSeeds(letter.recipient_id, 15, 'streak_milestone', client);
+      await awardSeeds(letter.sender_id, 15, 'streak_milestone', client);
+    }
+
     await upsertStreak(client, uid1, uid2, {
-      streak_days: streak.streak_days,
+      streak_days: newStreakDays,
       fuel: newFuel,
-      last_day_processed: streak.last_day_processed || today,
-      user1_sent_today: streak.user1_sent_today || false,
-      user2_sent_today: streak.user2_sent_today || false,
+      last_day_processed: today,
+      user1_sent_today: u1SentNow,
+      user2_sent_today: u2SentNow,
     });
 
-    res.json({ fuel: newFuel, streakDays: streak.streak_days });
+    res.json({ fuel: newFuel, streakDays: newStreakDays });
   } catch (err) {
     console.error('Arrived error:', err.message);
     res.status(500).json({ error: 'Server error' });
