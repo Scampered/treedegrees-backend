@@ -1,0 +1,237 @@
+// src/routes/grove.js — Seeds currency, stock scores, investments
+import { Router } from 'express';
+import pool from '../db/pool.js';
+import { requireAuth } from '../middleware/auth.js';
+
+const router = Router();
+const WITHDRAW_FEE = 0.10; // 10% fee on withdrawal
+
+// ── Award seeds for activity (called internally by other routes) ──────────────
+export async function awardSeeds(userId, amount, reason, client) {
+  const db = client || pool;
+  await db.query(
+    `UPDATE users SET seeds = GREATEST(0, COALESCE(seeds, 100) + $1) WHERE id = $2`,
+    [amount, userId]
+  );
+}
+
+// ── Sample current score into history ────────────────────────────────────────
+// Called periodically (or lazily on GET) — stores a snapshot every 3 hours max
+async function maybeSampleHistory(userId) {
+  const { rows: [last] } = await pool.query(
+    `SELECT sampled_at FROM stock_history WHERE user_id=$1 ORDER BY sampled_at DESC LIMIT 1`,
+    [userId]
+  );
+  const nowMs = Date.now();
+  const lastMs = last ? new Date(last.sampled_at).getTime() : 0;
+  if (nowMs - lastMs < 3 * 3600 * 1000) return; // less than 3h ago
+
+  const { rows: [u] } = await pool.query(
+    `SELECT seeds FROM users WHERE id=$1`, [userId]
+  );
+  if (!u) return;
+  await pool.query(
+    `INSERT INTO stock_history (user_id, score, seeds) VALUES ($1, $2, $3)`,
+    [userId, u.seeds, u.seeds]
+  );
+  // Keep only last 48 samples (6 days at 3h intervals)
+  await pool.query(
+    `DELETE FROM stock_history WHERE user_id=$1 AND id NOT IN (
+       SELECT id FROM stock_history WHERE user_id=$1 ORDER BY sampled_at DESC LIMIT 48
+     )`, [userId]
+  );
+}
+
+// ── GET /api/grove/me — own stock card + history ──────────────────────────────
+router.get('/me', requireAuth, async (req, res) => {
+  try {
+    await maybeSampleHistory(req.user.id);
+
+    const { rows: [user] } = await pool.query(
+      `SELECT seeds, COALESCE(nickname, split_part(full_name,' ',1)) AS name FROM users WHERE id=$1`,
+      [req.user.id]
+    );
+
+    // History: last 9 points (0, 3, 6, ... 24 hours)
+    const { rows: history } = await pool.query(
+      `SELECT seeds, sampled_at FROM stock_history WHERE user_id=$1 ORDER BY sampled_at ASC LIMIT 9`,
+      [req.user.id]
+    );
+
+    // Total invested IN me by others
+    const { rows: [inv] } = await pool.query(
+      `SELECT COALESCE(SUM(amount),0) AS total_invested,
+              COUNT(*) AS investor_count
+       FROM stock_investments WHERE target_id=$1`,
+      [req.user.id]
+    );
+
+    res.json({
+      seeds: user.seeds,
+      name: user.name,
+      history: history.map(h => ({ seeds: h.seeds, ts: h.sampled_at })),
+      totalInvested: parseInt(inv.total_invested),
+      investorCount: parseInt(inv.investor_count),
+    });
+  } catch (err) { console.error(err.message); res.status(500).json({ error: 'Server error' }); }
+});
+
+// ── GET /api/grove/connections — stock cards for all direct connections ───────
+router.get('/connections', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT u.id, COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS name,
+              u.seeds, u.city, u.country,
+              COALESCE(si_me.amount, 0) AS my_investment,
+              COALESCE(si_total.total, 0) AS total_invested,
+              COALESCE(si_total.cnt, 0) AS investor_count
+       FROM friendships f
+       JOIN users u ON (CASE WHEN f.user_id_1=$1 THEN f.user_id_2 ELSE f.user_id_1 END) = u.id
+       LEFT JOIN stock_investments si_me ON si_me.investor_id=$1 AND si_me.target_id=u.id
+       LEFT JOIN (
+         SELECT target_id, SUM(amount) AS total, COUNT(*) AS cnt
+         FROM stock_investments GROUP BY target_id
+       ) si_total ON si_total.target_id = u.id
+       WHERE (f.user_id_1=$1 OR f.user_id_2=$1) AND f.status='accepted' AND u.deleted_at IS NULL
+       ORDER BY u.seeds DESC`,
+      [req.user.id]
+    );
+
+    // For top 5 connections, pull last 9 history points
+    const top = rows.slice(0, 8);
+    const histMap = {};
+    for (const r of top) {
+      const { rows: hist } = await pool.query(
+        `SELECT seeds, sampled_at FROM stock_history WHERE user_id=$1 ORDER BY sampled_at ASC LIMIT 9`,
+        [r.id]
+      );
+      histMap[r.id] = hist.map(h => ({ seeds: h.seeds, ts: h.sampled_at }));
+    }
+
+    res.json(rows.map(r => ({
+      id: r.id, name: r.name, seeds: r.seeds,
+      city: r.city, country: r.country,
+      myInvestment: parseInt(r.my_investment),
+      totalInvested: parseInt(r.total_invested),
+      investorCount: parseInt(r.investor_count),
+      history: histMap[r.id] || [],
+    })));
+  } catch (err) { console.error(err.message); res.status(500).json({ error: 'Server error' }); }
+});
+
+// ── POST /api/grove/invest — invest seeds in a connection ─────────────────────
+router.post('/invest', requireAuth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { targetId, amount } = req.body;
+    const amt = Math.floor(Number(amount));
+    if (!targetId || amt < 10) return res.status(400).json({ error: 'Minimum investment is 10 seeds' });
+    if (targetId === req.user.id) return res.status(400).json({ error: 'Cannot invest in yourself' });
+
+    // Must be a direct connection
+    const [u1, u2] = [req.user.id, targetId].sort();
+    const friend = await client.query(
+      `SELECT 1 FROM friendships WHERE user_id_1=$1 AND user_id_2=$2 AND status='accepted'`, [u1, u2]
+    );
+    if (friend.rows.length === 0) return res.status(403).json({ error: 'Can only invest in direct connections' });
+
+    // Check investor has enough seeds
+    const { rows: [investor] } = await client.query(
+      `SELECT seeds FROM users WHERE id=$1 FOR UPDATE`, [req.user.id]
+    );
+    if (investor.seeds < amt) return res.status(400).json({ error: `Not enough seeds (you have ${investor.seeds})` });
+
+    // Check if already invested — top up
+    const { rows: [existing] } = await client.query(
+      `SELECT id, amount FROM stock_investments WHERE investor_id=$1 AND target_id=$2`,
+      [req.user.id, targetId]
+    );
+
+    // Deduct seeds from investor
+    await client.query(`UPDATE users SET seeds = seeds - $1 WHERE id=$2`, [amt, req.user.id]);
+
+    // Upsert investment
+    if (existing) {
+      await client.query(`UPDATE stock_investments SET amount = amount + $1 WHERE id=$2`, [amt, existing.id]);
+    } else {
+      await client.query(
+        `INSERT INTO stock_investments (investor_id, target_id, amount) VALUES ($1,$2,$3)`,
+        [req.user.id, targetId, amt]
+      );
+    }
+
+    // Target gets +5% of invested amount as a small boost
+    const boost = Math.max(1, Math.floor(amt * 0.05));
+    await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [boost, targetId]);
+
+    await client.query('COMMIT');
+    res.json({ ok: true, invested: amt, newBalance: investor.seeds - amt });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err.message); res.status(500).json({ error: 'Server error' });
+  } finally { client.release(); }
+});
+
+// ── POST /api/grove/withdraw — withdraw investment ────────────────────────────
+router.post('/withdraw', requireAuth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { targetId } = req.body;
+
+    const { rows: [inv] } = await client.query(
+      `SELECT id, amount FROM stock_investments WHERE investor_id=$1 AND target_id=$2 FOR UPDATE`,
+      [req.user.id, targetId]
+    );
+    if (!inv) return res.status(404).json({ error: 'No investment found' });
+
+    const fee    = Math.floor(inv.amount * WITHDRAW_FEE);
+    const payout = inv.amount - fee;
+
+    // Return payout to investor (original minus fee)
+    await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [payout, req.user.id]);
+
+    // Target keeps the fee (their reward for having been invested in)
+    await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [fee, targetId]);
+
+    // Remove investment record
+    await client.query(`DELETE FROM stock_investments WHERE id=$1`, [inv.id]);
+
+    // Target score dips slightly (3% of withdrawn amount, soft signal)
+    const scoreDip = Math.max(1, Math.floor(inv.amount * 0.03));
+    await client.query(
+      `UPDATE users SET seeds = GREATEST(0, seeds - $1) WHERE id=$2`, [scoreDip, targetId]
+    );
+
+    await client.query('COMMIT');
+    res.json({ ok: true, returned: payout, fee, newBalance: 0 });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err.message); res.status(500).json({ error: 'Server error' });
+  } finally { client.release(); }
+});
+
+// ── GET /api/grove/leaderboard — top 10 in your network ─────────────────────
+router.get('/leaderboard', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT u.id, COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS name,
+              u.seeds, u.city, u.country
+       FROM users u
+       WHERE u.id = $1 OR u.id IN (
+         SELECT CASE WHEN user_id_1=$1 THEN user_id_2 ELSE user_id_1 END
+         FROM friendships WHERE (user_id_1=$1 OR user_id_2=$1) AND status='accepted'
+       )
+       AND u.deleted_at IS NULL
+       ORDER BY u.seeds DESC LIMIT 10`,
+      [req.user.id]
+    );
+    res.json(rows.map((r, i) => ({
+      rank: i + 1, id: r.id, name: r.name, seeds: r.seeds,
+      city: r.city, country: r.country, isMe: r.id === req.user.id,
+    })));
+  } catch (err) { res.status(500).json({ error: 'Server error' }); }
+});
+
+export default router;

@@ -1,5 +1,6 @@
 // src/routes/games.js — Trump Card (full logic fixes)
 import { Router } from 'express';
+import { awardSeeds } from './grove.js';
 import pool from '../db/pool.js';
 import { requireAuth } from '../middleware/auth.js';
 
@@ -105,7 +106,8 @@ function giveCard(state, playerIndex, count = 1) {
 
 function calcPoints(state, winnerId) {
   const opponents = state.players.filter(p => p.userId !== winnerId).length;
-  return 100 + (opponents * 30);
+  // 20 base + 5 per opponent (2 players=25, 5 players=40, 9 players=60 max)
+  return 20 + (opponents * 5);
 }
 
 // ── Resolve combat with damage/destroyed card mechanic ────────────────────────
@@ -723,7 +725,7 @@ router.post('/:id/action', requireAuth, async (req, res) => {
     if (!result.ok) { await client.query('ROLLBACK'); return res.status(400).json({ error:result.error }); }
     if (state.status === 'ended' && state.winner) {
       const pts = calcPoints(state, state.winner);
-      await client.query(`UPDATE users SET game_points = COALESCE(game_points,0) + $1 WHERE id=$2`, [pts, state.winner]);
+      await client.query(`UPDATE users SET game_points = COALESCE(game_points,0) + $1, seeds = COALESCE(seeds,100) + $1 WHERE id=$2`, [pts, state.winner]);
       addLog(state, `🎖️ ${state.winnerName} earns ${pts} points!`);
     }
     await client.query(`UPDATE trump_card_games SET game_state=$1,status=$2,updated_at=NOW() WHERE id=$3`, [JSON.stringify(state), state.status, req.params.id]);

@@ -123,6 +123,8 @@ router.post('/', requireAuth, async (req, res) => {
       user2_sent_today: !isUser1 ? true : (freshStreak.user2_sent_today || false),
     });
 
+    // Award seeds: sender +20, recipient +30 (on arrival handled in /arrived)
+    await awardSeeds(req.user.id, 20, 'send_letter', client);
     res.status(201).json({
       id: letter.id, sentAt: letter.sent_at,
       arrivesAt: letter.arrives_at, vehicleTier: letter.vehicle_tier,
@@ -313,6 +315,8 @@ router.patch('/:id/arrived', requireAuth, async (req, res) => {
 
     // Add +1 fuel on arrival (capped at 3)
     const newFuel = Math.min(3, (streak.fuel || 0) + 1);
+    // Award seeds to recipient for receiving a letter
+    await awardSeeds(letter.recipient_id, 30, 'receive_letter', client);
     await upsertStreak(client, uid1, uid2, {
       streak_days: streak.streak_days,
       fuel: newFuel,

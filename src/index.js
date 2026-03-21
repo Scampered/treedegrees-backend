@@ -14,6 +14,7 @@ import lettersRoutes from './routes/letters.js';
 import adminRoutes from './routes/admin.js';
 import groupsRoutes from './routes/groups.js';
 import gamesRoutes from './routes/games.js';
+import groveRoutes from './routes/grove.js';
 import { requireAuth } from './middleware/auth.js';
 import pool from './db/pool.js';
 import { verifyToken } from './utils/auth.js';
@@ -140,6 +141,7 @@ app.use('/api/letters',   apiLimiter,  lettersRoutes);
 app.use('/api/admin',     apiLimiter,  adminRoutes);
 app.use('/api/groups',    apiLimiter,  groupsRoutes);
 app.use('/api/games',     apiLimiter,  gamesRoutes);
+app.use('/api/grove',     apiLimiter,  groveRoutes);
 
 // ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: 'Route not found' }));

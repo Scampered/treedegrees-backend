@@ -1,3 +1,4 @@
+import { awardSeeds } from './grove.js';
 // src/routes/users.js
 import { Router } from 'express';
 import pool from '../db/pool.js';
@@ -99,6 +100,7 @@ router.post('/daily-note', requireAuth, async (req, res) => {
        WHERE id = $2 RETURNING daily_note, daily_note_updated_at`,
       [note.trim(), req.user.id]
     );
+    await awardSeeds(req.user.id, 20, 'daily_note');
     res.json({ dailyNote: updated.rows[0].daily_note, dailyNoteUpdatedAt: updated.rows[0].daily_note_updated_at });
   } catch (err) {
     console.error('Daily note error:', err.message);
@@ -132,6 +134,7 @@ router.post('/daily-mood', requireAuth, async (req, res) => {
        WHERE id = $2 RETURNING daily_mood, daily_mood_updated_at`,
       [mood, req.user.id]
     );
+    await awardSeeds(req.user.id, 10, 'set_mood');
     res.json({ mood: updated.daily_mood, moodUpdatedAt: updated.daily_mood_updated_at });
   } catch (err) {
     console.error('Mood error:', err.message);
