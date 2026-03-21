@@ -299,4 +299,53 @@ router.get('/leaderboard', requireAuth, async (req, res) => {
   } catch (err) { console.error(err.message); res.status(500).json({ error: 'Server error' }); }
 });
 
+
+// ── GET /api/grove/history/:userId?window=12h|1d|1w ─────────────────────────
+// Returns stock_history points filtered to the requested time window
+router.get('/history/:userId', requireAuth, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const win = req.query.window || '1d'; // 12h | 1d | 1w
+
+    const windowMs = win === '12h' ? 12*3600*1000
+                   : win === '1w'  ? 7*24*3600*1000
+                   :                 24*3600*1000; // default 1d
+
+    // Only direct connections or self can see history
+    if (userId !== req.user.id) {
+      const [u1,u2] = [req.user.id, userId].sort();
+      const { rows } = await pool.query(
+        `SELECT 1 FROM friendships WHERE user_id_1=$1 AND user_id_2=$2 AND status='accepted'`, [u1,u2]
+      );
+      if (rows.length === 0) return res.status(403).json({ error: 'Not a direct connection' });
+    }
+
+    const since = new Date(Date.now() - windowMs).toISOString();
+    const { rows: points } = await pool.query(
+      `SELECT seeds, sampled_at FROM stock_history
+       WHERE user_id=$1 AND sampled_at >= $2
+       ORDER BY sampled_at ASC`,
+      [userId, since]
+    );
+
+    // Current value
+    const { rows:[u] } = await pool.query(`SELECT seeds FROM users WHERE id=$1`, [userId]);
+
+    // If no points in window, synthesise start and current
+    const now = new Date().toISOString();
+    let data = points.map(p => ({ seeds: p.seeds, ts: p.sampled_at }));
+    if (data.length === 0) {
+      data = [
+        { seeds: u?.seeds || 0, ts: since },
+        { seeds: u?.seeds || 0, ts: now },
+      ];
+    } else {
+      // Always append current value as the most recent point
+      data.push({ seeds: u?.seeds || 0, ts: now });
+    }
+
+    res.json({ data, window: win, currentSeeds: u?.seeds || 0 });
+  } catch (err) { console.error(err.message); res.status(500).json({ error: 'Server error' }); }
+});
+
 export default router;
