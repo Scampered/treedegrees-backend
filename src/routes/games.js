@@ -278,31 +278,57 @@ function processAction(state, type, payload, userId) {
       return { ok: true };
     }
 
-    // ── Block Comms ──
-    if (only?.id === 'block_comms') {
-      const idx = me.hand.findIndex(c => c.uid === only.uid);
-      me.hand.splice(idx, 1);
+    // ── Block Comms — works solo OR mixed with attack cards ──
+    const blockCard = cards.find(c => c.id === 'block_comms');
+    if (blockCard) {
+      // Remove the block_comms card from hand
+      const bIdx = me.hand.findIndex(c => c.uid === blockCard.uid);
+      if (bIdx >= 0) me.hand.splice(bIdx, 1);
       state.blockCommsNextPlayer = true;
-      addLog(state, `📡 ${me.name} blocks communications! Next player's cards are hidden.`);
-      state.turnPhase = 'select'; state.playZone = [];
-      state.turnPlayerIndex = nextAliveIndex(state, myIdx);
-      return { ok: true };
+      addLog(state, `📡 ${me.name} activates Block Communications! Next defender's cards are hidden.`);
+      // If solo, just end turn
+      const nonBlockCards = cards.filter(c => c.id !== 'block_comms');
+      if (nonBlockCards.length === 0) {
+        state.turnPhase = 'select'; state.playZone = [];
+        state.turnPlayerIndex = nextAliveIndex(state, myIdx);
+        return { ok: true };
+      }
+      // Otherwise fall through with remaining cards as the attack
+      // (spy/units below will use the remaining cards)
     }
 
-    // ── Spy Operation (solo or mixed with units) ──
-    const spyCard = cards.find(c => c.id === 'spy_operation');
+    // Refilter cards removing already-processed specials (block_comms handled above)
+    const remainingCards = cards.filter(c => c.id !== 'block_comms');
+
+    // ── Spy Operation (solo or mixed with units, supports multiple) ──
+    const spyCards = remainingCards.filter(c => c.id === 'spy_operation');
+    const spyCard = spyCards[0]; // handle first spy; extra spies handled below
     if (spyCard) {
       const sv = Math.max(2, Math.min(5, parseInt(spyValue) || 3));
       const chances = { 2:15, 3:25, 4:40, 5:55 };
       const spyIdx = me.hand.findIndex(c => c.uid === spyCard.uid);
       me.hand.splice(spyIdx, 1);
       const spyTargetIdx = nextAliveIndex(state, myIdx);
+      // If multiple spy cards, queue them (send to successive players)
+      if (spyCards.length > 1) {
+        const secondSpy = spyCards[1];
+        const s2Idx = me.hand.findIndex(c => c.uid === secondSpy.uid);
+        if (s2Idx >= 0) me.hand.splice(s2Idx, 1);
+        const nextSpyTarget = nextAliveIndex(state, spyTargetIdx);
+        if (nextSpyTarget !== myIdx && nextSpyTarget !== spyTargetIdx) {
+          // Send second spy to the player after the first target
+          addLog(state, `🕵️ ${me.name} also sends a Spy to ${state.players[nextSpyTarget].name}!`);
+          notify(state, nextSpyTarget, `🕵️ ${me.name} also sent you a Spy card (value ${sv}, ${chances[sv]}% spy chance).`);
+          // Store second spy in pendingSpy2
+          state.pendingSpy2 = { senderIdx: myIdx, targetIdx: nextSpyTarget, value: sv, spyChance: chances[sv] };
+        }
+      }
       state.pendingSpy = { senderIdx: myIdx, targetIdx: spyTargetIdx, value: sv, spyChance: chances[sv] };
       addLog(state, `🕵️ ${me.name} sends Spy Operation (value ${sv}) to ${state.players[spyTargetIdx].name}!`);
       notify(state, spyTargetIdx, `🕵️ ${me.name} sent you a Spy card (value ${sv}, ${chances[sv]}% spy chance). Deploy or discard?`);
 
       // If spy was the only card, end turn and let spy phase resolve
-      const unitCards2 = cards.filter(c => c.type === 'unit');
+      const unitCards2 = remainingCards.filter(c => c.type === 'unit' || (c.id !== 'spy_operation' && c.type !== 'special'));
       if (unitCards2.length === 0) {
         state.turnPhase = 'spy_pending';
         state.turnPlayerIndex = nextAliveIndex(state, myIdx);
@@ -314,7 +340,7 @@ function processAction(state, type, payload, userId) {
     }
 
     // ── Normal unit attack ──
-    const unitCards = cards.filter(c => c.type === 'unit');
+    const unitCards = (typeof remainingCards !== 'undefined' ? remainingCards : cards).filter(c => c.type === 'unit');
     if (unitCards.length === 0) return { ok: false, error: 'Need at least one unit card to attack' };
     for (const card of unitCards)
       me.hand.splice(me.hand.findIndex(c => c.uid === card.uid), 1);
@@ -343,7 +369,6 @@ function processAction(state, type, payload, userId) {
     if (state.turnPhase !== 'defending' && state.turnPhase !== 'diverting') return { ok: false, error: 'Not defense phase' };
 
     if (type === 'skip_defense' && !isTarget) {
-      // Only allowed after deadline for non-defenders
       const deadline = state.defenseDeadline ? new Date(state.defenseDeadline) : null;
       if (deadline && Date.now() < deadline.getTime())
         return { ok: false, error: 'Defense timer still running' };
@@ -353,6 +378,20 @@ function processAction(state, type, payload, userId) {
 
     const defender  = state.players[state.targetPlayerIndex];
     const defMyIdx  = state.targetPlayerIndex;
+
+    // ── Auto-resolve: defender has 0 cards — eliminate immediately ────────
+    if (defender.hand.length === 0) {
+      defender.eliminated = true;
+      addLog(state, `💀 ${defender.name} has no cards left — eliminated!`);
+      giveCard(state, state.turnPlayerIndex, 1);
+      state.playZone = []; state.attackTotal = 0; state.defenseTotal = 0;
+      state.targetPlayerIndex = null; state.defenseDeadline = null; state.pendingDivert = null;
+      if (!checkWin(state)) {
+        state.turnPhase = 'select';
+        state.turnPlayerIndex = nextAliveIndex(state, defMyIdx);
+      }
+      return { ok: true };
+    }
 
     let defCards    = [];
     let counterCard = null;
@@ -512,7 +551,7 @@ function playerView(state, userId) {
     defenseTotal:        state.defenseTotal || 0,
     targetPlayerIndex:   state.targetPlayerIndex,
     pendingDivertForMe:  state.pendingDivert?.defenderIdx === myIdx,
-    blockCommsActive:    !!state.blockCommsNextPlayer,
+    blockCommsActive:    !!(state.blockCommsNextPlayer || (state.turnPhase === 'defending' && state.playZone.some(c => c.hidden))),
     pendingSpyForMe:     state.pendingSpy?.targetIdx === myIdx ? { value: state.pendingSpy.value } : null,
     deckCount:           state.deck.length,
     log:                 (state.log  || []).slice(0, 20),
