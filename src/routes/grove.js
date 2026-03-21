@@ -66,10 +66,16 @@ router.get('/me', requireAuth, async (req, res) => {
       [req.user.id]
     );
 
+    // Synthesise 2 baseline points if no history yet so chart renders
+    const histPoints = history.map(h => ({ seeds: h.seeds, ts: h.sampled_at }));
+    if (histPoints.length < 2) {
+      const s = user.seeds || 0;
+      histPoints.unshift({ seeds: s, ts: new Date(Date.now() - 3*3600*1000).toISOString() });
+    }
     res.json({
       seeds: user.seeds,
       name: user.name,
-      history: history.map(h => ({ seeds: h.seeds, ts: h.sampled_at })),
+      history: histPoints,
       totalInvested: parseInt(inv.total_invested),
       investorCount: parseInt(inv.investor_count),
     });
@@ -79,33 +85,62 @@ router.get('/me', requireAuth, async (req, res) => {
 // ── GET /api/grove/connections — stock cards for all direct connections ───────
 router.get('/connections', requireAuth, async (req, res) => {
   try {
+    // Get friend IDs first, then join — avoids CASE WHEN ambiguity
     const { rows } = await pool.query(
       `SELECT u.id, COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS name,
-              u.seeds, u.city, u.country,
+              COALESCE(u.seeds, 0) AS seeds, u.city, u.country,
               COALESCE(si_me.amount, 0) AS my_investment,
               COALESCE(si_total.total, 0) AS total_invested,
               COALESCE(si_total.cnt, 0) AS investor_count
-       FROM friendships f
-       JOIN users u ON (CASE WHEN f.user_id_1=$1 THEN f.user_id_2 ELSE f.user_id_1 END) = u.id
-       LEFT JOIN stock_investments si_me ON si_me.investor_id=$1 AND si_me.target_id=u.id
+       FROM (
+         SELECT CASE WHEN user_id_1=$1 THEN user_id_2 ELSE user_id_1 END AS friend_id
+         FROM friendships
+         WHERE (user_id_1=$1 OR user_id_2=$1) AND status='accepted'
+       ) friends
+       JOIN users u ON u.id = friends.friend_id
+       LEFT JOIN stock_investments si_me
+         ON si_me.investor_id=$1 AND si_me.target_id=u.id
        LEFT JOIN (
          SELECT target_id, SUM(amount) AS total, COUNT(*) AS cnt
          FROM stock_investments GROUP BY target_id
        ) si_total ON si_total.target_id = u.id
-       WHERE (f.user_id_1=$1 OR f.user_id_2=$1) AND f.status='accepted' AND u.deleted_at IS NULL
-       ORDER BY u.seeds DESC`,
+       ORDER BY COALESCE(u.seeds,0) DESC`,
       [req.user.id]
     );
 
-    // For top 5 connections, pull last 9 history points
-    const top = rows.slice(0, 8);
+    // Pull history for all connections (batched in one query)
     const histMap = {};
-    for (const r of top) {
-      const { rows: hist } = await pool.query(
-        `SELECT seeds, sampled_at FROM stock_history WHERE user_id=$1 ORDER BY sampled_at ASC LIMIT 9`,
-        [r.id]
+    if (rows.length > 0) {
+      const ids = rows.map(r => r.id);
+      const { rows: allHist } = await pool.query(
+        `SELECT user_id, seeds, sampled_at
+         FROM stock_history
+         WHERE user_id = ANY($1::uuid[])
+         ORDER BY user_id, sampled_at ASC`,
+        [ids]
       );
-      histMap[r.id] = hist.map(h => ({ seeds: h.seeds, ts: h.sampled_at }));
+      // Group by user_id, keep last 9 per user
+      for (const h of allHist) {
+        if (!histMap[h.user_id]) histMap[h.user_id] = [];
+        histMap[h.user_id].push({ seeds: h.seeds, ts: h.sampled_at });
+      }
+      // Trim to last 9 each
+      for (const id of ids) {
+        if (histMap[id] && histMap[id].length > 9)
+          histMap[id] = histMap[id].slice(-9);
+      }
+
+      // If someone has no history yet, synthesise 2 points from current seeds
+      // so the sparkline renders rather than showing "No data yet"
+      for (const r of rows) {
+        if (!histMap[r.id] || histMap[r.id].length < 2) {
+          const s = parseInt(r.seeds) || 0;
+          histMap[r.id] = [
+            { seeds: s, ts: new Date(Date.now() - 3*3600*1000).toISOString() },
+            { seeds: s, ts: new Date().toISOString() },
+          ];
+        }
+      }
     }
 
     res.json(rows.map(r => ({
