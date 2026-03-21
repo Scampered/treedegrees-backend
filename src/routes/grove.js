@@ -179,7 +179,7 @@ router.post('/invest', requireAuth, async (req, res) => {
     );
     if (investor.seeds < amt) return res.status(400).json({ error: `Not enough seeds (you have ${investor.seeds})` });
 
-    // FIX: also fetch seeds_at_invest so top-ups use the correct original baseline
+    // Fetch full existing row including seeds_at_invest for correct top-up baseline
     const { rows: [existing] } = await client.query(
       `SELECT id, amount, seeds_at_invest FROM stock_investments WHERE investor_id=$1 AND target_id=$2`,
       [req.user.id, targetId]
@@ -194,10 +194,8 @@ router.post('/invest', requireAuth, async (req, res) => {
     );
     const targetSeedsNow = tgtNow?.seeds || 0;
 
-    // Upsert investment
     if (existing) {
-      // Top-up: weighted average of the original baseline and now
-      // FIX: existing.seeds_at_invest is now properly fetched (was missing before)
+      // Top-up: weighted average of the original baseline and current seeds
       const oldAmt      = existing.amount || 0;
       const oldBaseline = existing.seeds_at_invest || targetSeedsNow;
       const weightedBaseline = Math.round(
@@ -208,7 +206,7 @@ router.post('/invest', requireAuth, async (req, res) => {
         [amt, weightedBaseline, existing.id]
       );
     } else {
-      // First investment: record target's current seeds as the baseline
+      // First investment: record target's seeds right now as the baseline
       await client.query(
         `INSERT INTO stock_investments (investor_id, target_id, amount, seeds_at_invest) VALUES ($1,$2,$3,$4)`,
         [req.user.id, targetId, amt, targetSeedsNow]
@@ -255,31 +253,38 @@ router.post('/withdraw', requireAuth, async (req, res) => {
     const principal    = inv.amount;
 
     // Baseline: target's seeds when you invested. Floor at 10 to prevent div/0.
-    // If seeds_at_invest is 0 (pre-v16 or backfilled incorrectly) fall back to currentSeeds
-    // which gives multiplier=1 — honest "can't determine growth" behaviour.
     const baseline   = Math.max(10, inv.seeds_at_invest || currentSeeds);
 
-    // Multiplier: how much their score has grown since you invested, capped at 10×, floor at 0
+    // Multiplier: how much their score has grown since you invested, capped at 10×
     const rawMultiplier = currentSeeds / baseline;
     const multiplier    = Math.min(MAX_MULTIPLIER, Math.max(0, rawMultiplier));
 
-    // Split into halves
-    //   safe half  → always returned at face value (no fee, no multiplier)
-    //   active half → grows with the multiplier; 20% fee on this portion only
+    // Safe half always comes back at face value, no fee
+    // Active half grows with the multiplier, 20% fee on this portion only
     const activeHalf  = Math.floor(principal / 2);
     const safeHalf    = principal - activeHalf;
     const activeValue = Math.floor(activeHalf * multiplier);
-
-    // FIX: fee applies ONLY to the active portion, not the full totalValue.
-    // Example: invest 40 @ baseline 124, current 155 (×1.25):
-    //   activeHalf=20, activeValue=25, fee=5, payout = 20 + 25 - 5 = 40
-    const fee    = Math.floor(activeValue * WITHDRAW_FEE);
-    const payout = safeHalf + activeValue - fee;
+    const fee         = Math.floor(activeValue * WITHDRAW_FEE);
+    const payout      = safeHalf + activeValue - fee;
 
     // Return payout to investor
-    await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [payout, req.user.id]);
-    // Fee goes to the person you invested in (reward for growing)
-    await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [fee, targetId]);
+    await client.query(
+      `UPDATE users SET seeds = seeds + $1 WHERE id=$2`,
+      [payout, req.user.id]
+    );
+
+    // FIX: deduct the original principal from target (they held it while invested),
+    // then give back just the fee as their reward for growing.
+    // GREATEST(0,...) prevents going negative if something is off.
+    await client.query(
+      `UPDATE users SET seeds = GREATEST(0, seeds - $1) WHERE id=$2`,
+      [principal, targetId]
+    );
+    await client.query(
+      `UPDATE users SET seeds = seeds + $1 WHERE id=$2`,
+      [fee, targetId]
+    );
+
     // Remove investment record
     await client.query(`DELETE FROM stock_investments WHERE id=$1`, [inv.id]);
 
