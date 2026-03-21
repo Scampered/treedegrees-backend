@@ -91,7 +91,8 @@ router.get('/map', requireAuth, async (req, res) => {
     // 6. Fetch user data for all relevant nodes
     const { rows: users } = await pool.query(
       `SELECT id, full_name, nickname, city, country, latitude, longitude,
-              is_public, location_privacy, daily_note, daily_mood, daily_mood_updated_at
+              is_public, location_privacy, daily_note, daily_mood, daily_mood_updated_at,
+              COALESCE(seeds, 0) AS seeds
        FROM users
        WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL AND latitude IS NOT NULL`,
       [relevantIds]
@@ -247,6 +248,7 @@ router.get('/map', requireAuth, async (req, res) => {
         dailyNote: canSeeNote ? u.daily_note : null,
         hasNote: !isMe && myFriendIds.has(u.id) && !!u.daily_note && noteIsFresh,
         mood: canSeeMood ? u.daily_mood : null,
+        seeds: (isMe || myFriendIds.has(u.id)) ? (u.seeds || 0) : null,
       };
     });
 

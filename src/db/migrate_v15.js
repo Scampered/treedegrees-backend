@@ -9,9 +9,14 @@ UPDATE users SET seeds = 0;
 CREATE TABLE IF NOT EXISTS stock_history (
   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  seeds      INT NOT NULL,
+  seeds      INT NOT NULL DEFAULT 0,
   sampled_at TIMESTAMPTZ DEFAULT NOW()
 );
+-- Remove score column if it exists from an old version
+DO $$ BEGIN
+  ALTER TABLE stock_history DROP COLUMN IF EXISTS score;
+EXCEPTION WHEN others THEN NULL;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_sh_user_time ON stock_history(user_id, sampled_at DESC);
 CREATE TABLE IF NOT EXISTS stock_investments (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),

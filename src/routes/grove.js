@@ -31,8 +31,8 @@ async function maybeSampleHistory(userId) {
   );
   if (!u) return;
   await pool.query(
-    `INSERT INTO stock_history (user_id, score, seeds) VALUES ($1, $2, $3)`,
-    [userId, u.seeds, u.seeds]
+    `INSERT INTO stock_history (user_id, seeds) VALUES ($1, $2)`,
+    [userId, u.seeds]
   );
   // Keep only last 48 samples (6 days at 3h intervals)
   await pool.query(
@@ -45,7 +45,7 @@ async function maybeSampleHistory(userId) {
 // ── GET /api/grove/me — own stock card + history ──────────────────────────────
 router.get('/me', requireAuth, async (req, res) => {
   try {
-    await maybeSampleHistory(req.user.id);
+    try { await maybeSampleHistory(req.user.id); } catch (_) {}
 
     const { rows: [user] } = await pool.query(
       `SELECT seeds, COALESCE(nickname, split_part(full_name,' ',1)) AS name FROM users WHERE id=$1`,
