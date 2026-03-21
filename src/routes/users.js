@@ -112,21 +112,28 @@ router.post('/daily-note', requireAuth, async (req, res) => {
 // ── POST /api/users/daily-mood ────────────────────────────────────────────────
 router.post('/daily-mood', requireAuth, async (req, res) => {
   const VALID_MOODS = ['😄','😢','😡','😴','🤔','🥹'];
+  const COOLDOWN_MS = 4 * 3600 * 1000; // 4 hours
   try {
     const { mood } = req.body;
     if (!mood) return res.status(400).json({ error: 'Mood required' });
     if (!VALID_MOODS.includes(mood)) return res.status(400).json({ error: 'Invalid mood' });
 
-    // Allow updating mood once per 24h (independent of note)
     const { rows } = await pool.query(
-      'SELECT daily_mood_updated_at FROM users WHERE id = $1', [req.user.id]
+      'SELECT daily_mood, daily_mood_updated_at FROM users WHERE id = $1', [req.user.id]
     );
     if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
 
     const last = rows[0].daily_mood_updated_at;
-    if (last && (Date.now() - new Date(last).getTime()) < 86400000) {
-      // Within 24h — allow UPDATE (swap mood freely, 24h timer just resets the slot)
-      // We let them update anytime within 24h, the mood just replaces the old one
+    const ageMs = last ? Date.now() - new Date(last).getTime() : Infinity;
+    const isFirstSet = !last || ageMs >= COOLDOWN_MS; // cooldown expired OR never set
+
+    // Enforce cooldown server-side — reject if called again within 4h
+    if (!isFirstSet) {
+      const hoursLeft = ((COOLDOWN_MS - ageMs) / 3600000).toFixed(1);
+      return res.status(429).json({
+        error: `Mood can only be updated every 4 hours. Try again in ${hoursLeft}h.`,
+        hoursLeft: parseFloat(hoursLeft),
+      });
     }
 
     const { rows: [updated] } = await pool.query(
@@ -134,7 +141,10 @@ router.post('/daily-mood', requireAuth, async (req, res) => {
        WHERE id = $2 RETURNING daily_mood, daily_mood_updated_at`,
       [mood, req.user.id]
     );
+
+    // Only award seeds once per 4h window (first set, not spam)
     await awardSeeds(req.user.id, 10, 'set_mood');
+
     res.json({ mood: updated.daily_mood, moodUpdatedAt: updated.daily_mood_updated_at });
   } catch (err) {
     console.error('Mood error:', err.message);
