@@ -104,7 +104,7 @@ router.get('/connections', requireAuth, async (req, res) => {
     // Get friend IDs first, then join — avoids CASE WHEN ambiguity
     const { rows } = await pool.query(
       `SELECT u.id, COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS name,
-              COALESCE(u.seeds, 0) AS seeds, u.city, u.country,
+              COALESCE(u.seeds, 0) AS seeds, u.country,
               COALESCE(si_me.amount, 0) AS my_investment,
               COALESCE(si_total.total, 0) AS total_invested,
               COALESCE(si_total.cnt, 0) AS investor_count
@@ -163,7 +163,7 @@ router.get('/connections', requireAuth, async (req, res) => {
 
     res.json(rows.map(r => ({
       id: r.id, name: r.name, seeds: r.seeds,
-      city: r.city, country: r.country,
+      country: r.country,
       myInvestment: parseInt(r.my_investment),
       totalInvested: parseInt(r.total_invested),
       investorCount: parseInt(r.investor_count),

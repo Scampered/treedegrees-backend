@@ -274,6 +274,7 @@ router.get('/streaks', requireAuth, async (req, res) => {
           await upsertStreak(client, u1, u2, streak);
         }
         const tier = getVehicleTier(streak.streak_days);
+        const isUser1 = req.user.id === [req.user.id, friend.friend_id].sort()[0];
         results.push({
           friendId: friend.friend_id,
           displayName: resolveDisplayName(friend.friend_id, friend.own_nick, myNicknameMap),
@@ -283,6 +284,9 @@ router.get('/streaks', requireAuth, async (req, res) => {
           tierLabel: VEHICLE_TIERS[tier].label,
           tierEmoji: VEHICLE_TIERS[tier].emoji,
           nextMilestone: nextVehicleMilestone(streak.streak_days),
+          iSentToday: isUser1 ? (streak.user1_sent_today || false) : (streak.user2_sent_today || false),
+          theySentToday: isUser1 ? (streak.user2_sent_today || false) : (streak.user1_sent_today || false),
+          lastDayProcessed: streak.last_day_processed || null,
         });
       }
     } finally {
