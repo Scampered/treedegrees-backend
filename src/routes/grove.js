@@ -4,28 +4,23 @@ import pool from '../db/pool.js';
 import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
-const WITHDRAW_FEE = 0.20; // 20% fee on withdrawal
+const WITHDRAW_FEE = 0.20; // 20% fee on the active portion on withdrawal
 const MAX_MULTIPLIER = 10;  // cap growth multiplier at 10×
 
 // ── Award seeds for activity (called internally by other routes) ──────────────
 export async function awardSeeds(userId, amount, reason, client) {
   const db = client || pool;
-  // Use RETURNING to get the new value in one round-trip, inside whatever transaction is active
   const { rows: [updated] } = await db.query(
     `UPDATE users SET seeds = GREATEST(0, COALESCE(seeds, 0) + $1) WHERE id = $2 RETURNING seeds`,
     [amount, userId]
   );
   if (!updated) return;
 
-  // Record history snapshot with the actual new value.
-  // Use pool directly so history always commits even if caller rolls back.
-  // We already have the new value so no second SELECT needed.
   try {
     await pool.query(
       `INSERT INTO stock_history (user_id, seeds) VALUES ($1, $2)`,
       [userId, updated.seeds]
     );
-    // Async trim — fire and forget
     pool.query(
       `DELETE FROM stock_history WHERE user_id=$1 AND id NOT IN (
          SELECT id FROM stock_history WHERE user_id=$1 ORDER BY sampled_at DESC LIMIT 48
@@ -35,17 +30,14 @@ export async function awardSeeds(userId, amount, reason, client) {
 }
 
 // ── Sample current score into history ────────────────────────────────────────
-// Called periodically (or lazily on GET) — stores a snapshot every 3 hours max
 async function maybeSampleHistory(userId) {
-  // Lazy sampler: only fires on /me GET, records baseline every 30min max.
-  // awardSeeds() records a point on every activity, so this mainly catches inactivity.
   const { rows: [last] } = await pool.query(
     `SELECT sampled_at FROM stock_history WHERE user_id=$1 ORDER BY sampled_at DESC LIMIT 1`,
     [userId]
   );
   const nowMs = Date.now();
   const lastMs = last ? new Date(last.sampled_at).getTime() : 0;
-  if (nowMs - lastMs < 30 * 60 * 1000) return; // less than 30min ago — skip
+  if (nowMs - lastMs < 30 * 60 * 1000) return;
 
   const { rows: [u] } = await pool.query(`SELECT seeds FROM users WHERE id=$1`, [userId]);
   if (!u) return;
@@ -59,7 +51,7 @@ async function maybeSampleHistory(userId) {
   );
 }
 
-// ── GET /api/grove/me — own stock card + history ──────────────────────────────
+// ── GET /api/grove/me ─────────────────────────────────────────────────────────
 router.get('/me', requireAuth, async (req, res) => {
   try {
     try { await maybeSampleHistory(req.user.id); } catch (_) {}
@@ -69,13 +61,11 @@ router.get('/me', requireAuth, async (req, res) => {
       [req.user.id]
     );
 
-    // History: last 9 points (0, 3, 6, ... 24 hours)
     const { rows: history } = await pool.query(
       `SELECT seeds, sampled_at FROM stock_history WHERE user_id=$1 ORDER BY sampled_at ASC LIMIT 9`,
       [req.user.id]
     );
 
-    // Total invested IN me by others
     const { rows: [inv] } = await pool.query(
       `SELECT COALESCE(SUM(amount),0) AS total_invested,
               COUNT(*) AS investor_count
@@ -83,7 +73,6 @@ router.get('/me', requireAuth, async (req, res) => {
       [req.user.id]
     );
 
-    // Synthesise 2 baseline points if no history yet so chart renders
     const histPoints = history.map(h => ({ seeds: h.seeds, ts: h.sampled_at }));
     if (histPoints.length < 2) {
       const s = user.seeds || 0;
@@ -99,10 +88,9 @@ router.get('/me', requireAuth, async (req, res) => {
   } catch (err) { console.error(err.message); res.status(500).json({ error: 'Server error' }); }
 });
 
-// ── GET /api/grove/connections — stock cards for all direct connections ───────
+// ── GET /api/grove/connections ────────────────────────────────────────────────
 router.get('/connections', requireAuth, async (req, res) => {
   try {
-    // Get friend IDs first, then join — avoids CASE WHEN ambiguity
     const { rows } = await pool.query(
       `SELECT u.id, COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS name,
               COALESCE(u.seeds, 0) AS seeds, u.country,
@@ -126,7 +114,6 @@ router.get('/connections', requireAuth, async (req, res) => {
       [req.user.id]
     );
 
-    // Pull history for all connections (batched in one query)
     const histMap = {};
     if (rows.length > 0) {
       const ids = rows.map(r => r.id);
@@ -137,18 +124,15 @@ router.get('/connections', requireAuth, async (req, res) => {
          ORDER BY user_id, sampled_at ASC`,
         [ids]
       );
-      // Group by user_id, keep last 9 per user
       for (const h of allHist) {
         if (!histMap[h.user_id]) histMap[h.user_id] = [];
         histMap[h.user_id].push({ seeds: h.seeds, ts: h.sampled_at });
       }
-      // Trim to last 9 each
       for (const id of ids) {
         if (histMap[id] && histMap[id].length > 9)
           histMap[id] = histMap[id].slice(-9);
       }
 
-      // If someone has no history yet, show a flat baseline so chart renders
       for (const r of rows) {
         if (!histMap[r.id] || histMap[r.id].length < 1) {
           const s = parseInt(r.seeds) || 0;
@@ -157,7 +141,6 @@ router.get('/connections', requireAuth, async (req, res) => {
             { seeds: s, ts: new Date().toISOString() },
           ];
         } else if (histMap[r.id].length < 2) {
-          // Only one point — duplicate it so sparkline has something to render
           histMap[r.id] = [histMap[r.id][0], histMap[r.id][0]];
         }
       }
@@ -175,7 +158,7 @@ router.get('/connections', requireAuth, async (req, res) => {
   } catch (err) { console.error(err.message); res.status(500).json({ error: 'Server error' }); }
 });
 
-// ── POST /api/grove/invest — invest seeds in a connection ─────────────────────
+// ── POST /api/grove/invest ────────────────────────────────────────────────────
 router.post('/invest', requireAuth, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -185,29 +168,27 @@ router.post('/invest', requireAuth, async (req, res) => {
     if (!targetId || amt < 10) return res.status(400).json({ error: 'Minimum investment is 10 seeds' });
     if (targetId === req.user.id) return res.status(400).json({ error: 'Cannot invest in yourself' });
 
-    // Must be a direct connection
     const [u1, u2] = [req.user.id, targetId].sort();
     const friend = await client.query(
       `SELECT 1 FROM friendships WHERE user_id_1=$1 AND user_id_2=$2 AND status='accepted'`, [u1, u2]
     );
     if (friend.rows.length === 0) return res.status(403).json({ error: 'Can only invest in direct connections' });
 
-    // Check investor has enough seeds
     const { rows: [investor] } = await client.query(
       `SELECT seeds FROM users WHERE id=$1 FOR UPDATE`, [req.user.id]
     );
     if (investor.seeds < amt) return res.status(400).json({ error: `Not enough seeds (you have ${investor.seeds})` });
 
-    // Check if already invested — top up
+    // FIX: also fetch seeds_at_invest so top-ups use the correct original baseline
     const { rows: [existing] } = await client.query(
-      `SELECT id, amount FROM stock_investments WHERE investor_id=$1 AND target_id=$2`,
+      `SELECT id, amount, seeds_at_invest FROM stock_investments WHERE investor_id=$1 AND target_id=$2`,
       [req.user.id, targetId]
     );
 
     // Deduct seeds from investor
     await client.query(`UPDATE users SET seeds = seeds - $1 WHERE id=$2`, [amt, req.user.id]);
 
-    // Record target's current seeds so we can calculate return on withdrawal
+    // Read target seeds BEFORE they receive this investment — this is the baseline for new money
     const { rows: [tgtNow] } = await client.query(
       `SELECT seeds FROM users WHERE id=$1`, [targetId]
     );
@@ -215,27 +196,30 @@ router.post('/invest', requireAuth, async (req, res) => {
 
     // Upsert investment
     if (existing) {
-      // On top-up: weighted average seeds_at_invest
-      const oldAmt = existing.amount || 0;
+      // Top-up: weighted average of the original baseline and now
+      // FIX: existing.seeds_at_invest is now properly fetched (was missing before)
+      const oldAmt      = existing.amount || 0;
       const oldBaseline = existing.seeds_at_invest || targetSeedsNow;
-      const weightedBaseline = Math.round((oldBaseline * oldAmt + targetSeedsNow * amt) / (oldAmt + amt));
+      const weightedBaseline = Math.round(
+        (oldBaseline * oldAmt + targetSeedsNow * amt) / (oldAmt + amt)
+      );
       await client.query(
         `UPDATE stock_investments SET amount = amount + $1, seeds_at_invest = $2 WHERE id=$3`,
         [amt, weightedBaseline, existing.id]
       );
     } else {
+      // First investment: record target's current seeds as the baseline
       await client.query(
         `INSERT INTO stock_investments (investor_id, target_id, amount, seeds_at_invest) VALUES ($1,$2,$3,$4)`,
         [req.user.id, targetId, amt, targetSeedsNow]
       );
     }
 
-    // The full investment goes to the target immediately (it's their stake)
+    // Full investment amount goes to target immediately
     await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [amt, targetId]);
 
     await client.query('COMMIT');
 
-    // Record history snapshots for both parties now that seeds have changed
     try {
       const [invRow] = (await pool.query(`SELECT seeds FROM users WHERE id=$1`, [req.user.id])).rows;
       const [tgtRow] = (await pool.query(`SELECT seeds FROM users WHERE id=$1`, [targetId])).rows;
@@ -250,7 +234,7 @@ router.post('/invest', requireAuth, async (req, res) => {
   } finally { client.release(); }
 });
 
-// ── POST /api/grove/withdraw — withdraw investment ────────────────────────────
+// ── POST /api/grove/withdraw ──────────────────────────────────────────────────
 router.post('/withdraw', requireAuth, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -264,41 +248,43 @@ router.post('/withdraw', requireAuth, async (req, res) => {
     );
     if (!inv) return res.status(404).json({ error: 'No investment found' });
 
-    // Get target's current seeds
     const { rows: [tgtCurrent] } = await client.query(
       `SELECT seeds FROM users WHERE id=$1`, [targetId]
     );
-    const currentSeeds  = tgtCurrent?.seeds || 0;
-    const principal     = inv.amount; // what you originally invested
+    const currentSeeds = tgtCurrent?.seeds || 0;
+    const principal    = inv.amount;
 
-    // Baseline: target's score when you invested. Floor at 10 to prevent div/0.
-    const baseline      = Math.max(10, inv.seeds_at_invest || currentSeeds);
+    // Baseline: target's seeds when you invested. Floor at 10 to prevent div/0.
+    // If seeds_at_invest is 0 (pre-v16 or backfilled incorrectly) fall back to currentSeeds
+    // which gives multiplier=1 — honest "can't determine growth" behaviour.
+    const baseline   = Math.max(10, inv.seeds_at_invest || currentSeeds);
 
-    // Raw multiplier (how much their score changed), capped at 10×, floor at 0
+    // Multiplier: how much their score has grown since you invested, capped at 10×, floor at 0
     const rawMultiplier = currentSeeds / baseline;
     const multiplier    = Math.min(MAX_MULTIPLIER, Math.max(0, rawMultiplier));
 
-    // Only 50% of your investment tracks the multiplier (active stake).
-    // The other 50% is the safe/inactive half — always returned at face value.
-    const activeHalf    = principal / 2;
-    const safeHalf      = principal - activeHalf;
-    const activeValue   = activeHalf * multiplier;
-    const totalValue    = Math.floor(safeHalf + activeValue);
+    // Split into halves
+    //   safe half  → always returned at face value (no fee, no multiplier)
+    //   active half → grows with the multiplier; 20% fee on this portion only
+    const activeHalf  = Math.floor(principal / 2);
+    const safeHalf    = principal - activeHalf;
+    const activeValue = Math.floor(activeHalf * multiplier);
 
-    // 20% fee on total value — goes to the person you invested in
-    const fee           = Math.floor(totalValue * WITHDRAW_FEE);
-    const payout        = totalValue - fee;
+    // FIX: fee applies ONLY to the active portion, not the full totalValue.
+    // Example: invest 40 @ baseline 124, current 155 (×1.25):
+    //   activeHalf=20, activeValue=25, fee=5, payout = 20 + 25 - 5 = 40
+    const fee    = Math.floor(activeValue * WITHDRAW_FEE);
+    const payout = safeHalf + activeValue - fee;
 
     // Return payout to investor
     await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [payout, req.user.id]);
-    // Target keeps the fee (reward for having been worth investing in)
+    // Fee goes to the person you invested in (reward for growing)
     await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [fee, targetId]);
     // Remove investment record
     await client.query(`DELETE FROM stock_investments WHERE id=$1`, [inv.id]);
 
     await client.query('COMMIT');
 
-    // Record history for both
     try {
       const [ir] = (await pool.query(`SELECT seeds FROM users WHERE id=$1`, [req.user.id])).rows;
       const [tr] = (await pool.query(`SELECT seeds FROM users WHERE id=$1`, [targetId])).rows;
@@ -306,14 +292,22 @@ router.post('/withdraw', requireAuth, async (req, res) => {
       if (tr) await pool.query(`INSERT INTO stock_history (user_id, seeds) VALUES ($1,$2)`, [targetId, tr.seeds]);
     } catch (_) {}
 
-    res.json({ ok: true, returned: payout, principal, fee, multiplier: Math.round(multiplier * 100) / 100, totalValue });
+    res.json({
+      ok: true,
+      returned: payout,
+      principal,
+      fee,
+      multiplier: Math.round(multiplier * 100) / 100,
+      activeValue,
+      safeHalf,
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err.message); res.status(500).json({ error: 'Server error' });
   } finally { client.release(); }
 });
 
-// ── GET /api/grove/leaderboard — top 10 in your network ─────────────────────
+// ── GET /api/grove/leaderboard ────────────────────────────────────────────────
 router.get('/leaderboard', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -337,19 +331,16 @@ router.get('/leaderboard', requireAuth, async (req, res) => {
   } catch (err) { console.error(err.message); res.status(500).json({ error: 'Server error' }); }
 });
 
-
-// ── GET /api/grove/history/:userId?window=12h|1d|1w ─────────────────────────
-// Returns stock_history points filtered to the requested time window
+// ── GET /api/grove/history/:userId ───────────────────────────────────────────
 router.get('/history/:userId', requireAuth, async (req, res) => {
   try {
     const { userId } = req.params;
-    const win = req.query.window || '1d'; // 12h | 1d | 1w
+    const win = req.query.window || '1d';
 
     const windowMs = win === '12h' ? 12*3600*1000
                    : win === '1w'  ? 7*24*3600*1000
-                   :                 24*3600*1000; // default 1d
+                   :                 24*3600*1000;
 
-    // Only direct connections or self can see history
     if (userId !== req.user.id) {
       const [u1,u2] = [req.user.id, userId].sort();
       const { rows } = await pool.query(
@@ -366,10 +357,8 @@ router.get('/history/:userId', requireAuth, async (req, res) => {
       [userId, since]
     );
 
-    // Current value
     const { rows:[u] } = await pool.query(`SELECT seeds FROM users WHERE id=$1`, [userId]);
 
-    // If no points in window, synthesise start and current
     const now = new Date().toISOString();
     let data = points.map(p => ({ seeds: p.seeds, ts: p.sampled_at }));
     if (data.length === 0) {
@@ -378,7 +367,6 @@ router.get('/history/:userId', requireAuth, async (req, res) => {
         { seeds: u?.seeds || 0, ts: now },
       ];
     } else {
-      // Always append current value as the most recent point
       data.push({ seeds: u?.seeds || 0, ts: now });
     }
 
