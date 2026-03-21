@@ -91,7 +91,7 @@ router.get('/map', requireAuth, async (req, res) => {
     // 6. Fetch user data for all relevant nodes
     const { rows: users } = await pool.query(
       `SELECT id, full_name, nickname, city, country, latitude, longitude,
-              is_public, location_privacy, daily_note
+              is_public, location_privacy, daily_note, daily_mood, daily_mood_updated_at
        FROM users
        WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL AND latitude IS NOT NULL`,
       [relevantIds]
@@ -216,8 +216,15 @@ router.get('/map', requireAuth, async (req, res) => {
       const noteAge = u.daily_note_updated_at
         ? (Date.now() - new Date(u.daily_note_updated_at).getTime())
         : Infinity;
-      const noteIsFresh = noteAge < 86400000; // 24 hours in ms
+      const noteIsFresh = noteAge < 86400000;
       const canSeeNote = !isMe && myFriendIds.has(u.id) && noteIsFresh;
+
+      // Mood — ONLY direct friends (or self), fresh within 24h
+      const moodAge = u.daily_mood_updated_at
+        ? (Date.now() - new Date(u.daily_mood_updated_at).getTime())
+        : Infinity;
+      const moodIsFresh = moodAge < 86400000;
+      const canSeeMood = (isMe || myFriendIds.has(u.id)) && moodIsFresh && !!u.daily_mood;
 
       // City — hide exact city when location is private/hidden (show country only)
       const locationIsApprox = isApproximate || effectivelyHidden;
@@ -239,6 +246,7 @@ router.get('/map', requireAuth, async (req, res) => {
         isPublic: u.is_public,
         dailyNote: canSeeNote ? u.daily_note : null,
         hasNote: !isMe && myFriendIds.has(u.id) && !!u.daily_note && noteIsFresh,
+        mood: canSeeMood ? u.daily_mood : null,
       };
     });
 

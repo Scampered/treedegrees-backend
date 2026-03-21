@@ -106,6 +106,52 @@ router.post('/daily-note', requireAuth, async (req, res) => {
   }
 });
 
+
+// ── POST /api/users/daily-mood ────────────────────────────────────────────────
+router.post('/daily-mood', requireAuth, async (req, res) => {
+  const VALID_MOODS = ['😄','😢','😡','😴','🤔','🥹'];
+  try {
+    const { mood } = req.body;
+    if (!mood) return res.status(400).json({ error: 'Mood required' });
+    if (!VALID_MOODS.includes(mood)) return res.status(400).json({ error: 'Invalid mood' });
+
+    // Allow updating mood once per 24h (independent of note)
+    const { rows } = await pool.query(
+      'SELECT daily_mood_updated_at FROM users WHERE id = $1', [req.user.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
+
+    const last = rows[0].daily_mood_updated_at;
+    if (last && (Date.now() - new Date(last).getTime()) < 86400000) {
+      // Within 24h — allow UPDATE (swap mood freely, 24h timer just resets the slot)
+      // We let them update anytime within 24h, the mood just replaces the old one
+    }
+
+    const { rows: [updated] } = await pool.query(
+      `UPDATE users SET daily_mood = $1, daily_mood_updated_at = NOW()
+       WHERE id = $2 RETURNING daily_mood, daily_mood_updated_at`,
+      [mood, req.user.id]
+    );
+    res.json({ mood: updated.daily_mood, moodUpdatedAt: updated.daily_mood_updated_at });
+  } catch (err) {
+    console.error('Mood error:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── DELETE /api/users/daily-mood — clear mood ─────────────────────────────────
+router.delete('/daily-mood', requireAuth, async (req, res) => {
+  try {
+    await pool.query(
+      `UPDATE users SET daily_mood = NULL, daily_mood_updated_at = NULL WHERE id = $1`,
+      [req.user.id]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // ── GET /api/users/feed ───────────────────────────────────────────────────────
 // FIX: Direct friends (1st degree) can ALWAYS see each other's notes,
 // regardless of is_public. is_public only gates visibility to 2nd/3rd degree.
@@ -118,7 +164,8 @@ router.get('/feed', requireAuth, async (req, res) => {
         u.id,
         COALESCE(u.nickname, split_part(u.full_name, ' ', 1)) AS display_name,
         u.city, u.country,
-        u.daily_note, u.daily_note_updated_at
+        u.daily_note, u.daily_note_updated_at,
+        u.daily_mood, u.daily_mood_updated_at
        FROM friendships f
        JOIN users u ON (
          CASE WHEN f.user_id_1 = $1 THEN f.user_id_2 ELSE f.user_id_1 END = u.id
@@ -126,10 +173,11 @@ router.get('/feed', requireAuth, async (req, res) => {
        WHERE (f.user_id_1 = $1 OR f.user_id_2 = $1)
          AND f.status = 'accepted'
          AND u.deleted_at IS NULL
-         AND u.daily_note IS NOT NULL
-         AND u.daily_note != ''
-         AND u.daily_note_updated_at > NOW() - INTERVAL '24 hours'
-       ORDER BY u.daily_note_updated_at DESC`,
+         AND (
+           (u.daily_note IS NOT NULL AND u.daily_note != '' AND u.daily_note_updated_at > NOW() - INTERVAL '24 hours')
+           OR (u.daily_mood IS NOT NULL AND u.daily_mood_updated_at > NOW() - INTERVAL '24 hours')
+         )
+       ORDER BY GREATEST(u.daily_note_updated_at, u.daily_mood_updated_at) DESC`,
       [req.user.id]
     );
     res.json(rows.map(u => ({
@@ -139,6 +187,7 @@ router.get('/feed', requireAuth, async (req, res) => {
       country: u.country,
       note: u.daily_note,
       postedAt: u.daily_note_updated_at,
+      mood: u.daily_mood_updated_at && (Date.now() - new Date(u.daily_mood_updated_at).getTime()) < 86400000 ? u.daily_mood : null,
     })));
   } catch (err) {
     console.error('Feed error:', err.message);

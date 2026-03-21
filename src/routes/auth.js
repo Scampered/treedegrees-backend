@@ -97,7 +97,7 @@ router.post('/login', async (req, res) => {
     const result = await pool.query(
       `SELECT id, full_name, nickname, email, password_hash, city, country,
               latitude, longitude, friend_code, bio, is_public, connections_public,
-              location_privacy, daily_note, daily_note_updated_at, email_verified
+              location_privacy, daily_note, daily_note_updated_at, daily_mood, daily_mood_updated_at, email_verified
        FROM users WHERE email = $1 AND deleted_at IS NULL`,
       [email.toLowerCase().trim()]
     );
@@ -134,7 +134,7 @@ router.get('/me', requireAuth, async (req, res) => {
     const result = await pool.query(
       `SELECT id, full_name, nickname, email, city, country, latitude, longitude,
               friend_code, bio, is_public, connections_public, location_privacy,
-              daily_note, daily_note_updated_at, email_verified, created_at
+              daily_note, daily_note_updated_at, daily_mood, daily_mood_updated_at, email_verified, created_at
        FROM users WHERE id = $1 AND deleted_at IS NULL`,
       [req.user.id]
     );
@@ -151,6 +151,10 @@ router.get('/me', requireAuth, async (req, res) => {
         (Date.now() - new Date(u.daily_note_updated_at).getTime()) < 86400000
         ? u.daily_note : null,
       dailyNoteUpdatedAt: u.daily_note_updated_at,
+      mood: u.daily_mood_updated_at &&
+        (Date.now() - new Date(u.daily_mood_updated_at).getTime()) < 86400000
+        ? u.daily_mood : null,
+      moodUpdatedAt: u.daily_mood_updated_at,
       emailVerified: u.email_verified, createdAt: u.created_at,
     });
   } catch (err) {
