@@ -107,6 +107,7 @@ router.get('/connections', requireAuth, async (req, res) => {
       `SELECT u.id, COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS name,
               COALESCE(u.seeds, 0) AS seeds, u.country,
               COALESCE(si_me.amount, 0) AS my_investment,
+              COALESCE(si_me.seeds_at_invest, 0) AS my_seeds_at_invest,
               COALESCE(si_total.total, 0) AS total_invested,
               COALESCE(si_total.cnt, 0) AS investor_count
        FROM (
@@ -166,6 +167,7 @@ router.get('/connections', requireAuth, async (req, res) => {
       id: r.id, name: r.name, seeds: r.seeds,
       country: r.country,
       myInvestment: parseInt(r.my_investment),
+      mySeedsAtInvest: parseInt(r.my_seeds_at_invest) || 0,
       totalInvested: parseInt(r.total_invested),
       investorCount: parseInt(r.investor_count),
       history: histMap[r.id] || [],
