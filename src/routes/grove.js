@@ -248,26 +248,27 @@ router.post('/withdraw', requireAuth, async (req, res) => {
     );
     if (!inv) return res.status(404).json({ error: 'No investment found' });
 
-    const fee    = Math.floor(inv.amount * WITHDRAW_FEE);
+    const fee    = Math.floor(inv.amount * WITHDRAW_FEE);  // 10% fee
     const payout = inv.amount - fee;
 
-    // Return payout to investor (original minus fee)
+    // Return payout to investor
     await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [payout, req.user.id]);
-
-    // Target keeps the fee (their reward for having been invested in)
+    // Target keeps the fee (reward for having been invested in)
     await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [fee, targetId]);
-
     // Remove investment record
     await client.query(`DELETE FROM stock_investments WHERE id=$1`, [inv.id]);
 
-    // Target score dips slightly (3% of withdrawn amount, soft signal)
-    const scoreDip = Math.max(1, Math.floor(inv.amount * 0.03));
-    await client.query(
-      `UPDATE users SET seeds = GREATEST(0, seeds - $1) WHERE id=$2`, [scoreDip, targetId]
-    );
-
     await client.query('COMMIT');
-    res.json({ ok: true, returned: payout, fee, newBalance: 0 });
+
+    // Record history for both (fire and forget)
+    try {
+      const [ir] = (await pool.query(`SELECT seeds FROM users WHERE id=$1`, [req.user.id])).rows;
+      const [tr] = (await pool.query(`SELECT seeds FROM users WHERE id=$1`, [targetId])).rows;
+      if (ir) await pool.query(`INSERT INTO stock_history (user_id, seeds) VALUES ($1,$2)`, [req.user.id, ir.seeds]);
+      if (tr) await pool.query(`INSERT INTO stock_history (user_id, seeds) VALUES ($1,$2)`, [targetId, tr.seeds]);
+    } catch (_) {}
+
+    res.json({ ok: true, returned: payout, fee });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err.message); res.status(500).json({ error: 'Server error' });
@@ -278,22 +279,24 @@ router.post('/withdraw', requireAuth, async (req, res) => {
 router.get('/leaderboard', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT u.id, COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS name,
-              u.seeds, u.city, u.country
+      `SELECT u.id,
+              COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS name,
+              COALESCE(u.seeds, 0) AS seeds,
+              u.country
        FROM users u
-       WHERE u.id = $1 OR u.id IN (
+       WHERE (u.id = $1 OR u.id IN (
          SELECT CASE WHEN user_id_1=$1 THEN user_id_2 ELSE user_id_1 END
          FROM friendships WHERE (user_id_1=$1 OR user_id_2=$1) AND status='accepted'
-       )
-       AND u.deleted_at IS NULL
-       ORDER BY u.seeds DESC LIMIT 10`,
+       ))
+       AND (u.deleted_at IS NULL OR u.deleted_at > NOW())
+       ORDER BY COALESCE(u.seeds,0) DESC LIMIT 10`,
       [req.user.id]
     );
     res.json(rows.map((r, i) => ({
       rank: i + 1, id: r.id, name: r.name, seeds: r.seeds,
-      city: r.city, country: r.country, isMe: r.id === req.user.id,
+      country: r.country, isMe: r.id === req.user.id,
     })));
-  } catch (err) { res.status(500).json({ error: 'Server error' }); }
+  } catch (err) { console.error(err.message); res.status(500).json({ error: 'Server error' }); }
 });
 
 export default router;
