@@ -4,7 +4,8 @@ import pool from '../db/pool.js';
 import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
-const WITHDRAW_FEE = 0.10; // 10% fee on withdrawal
+const WITHDRAW_FEE = 0.20; // 20% fee on withdrawal
+const MAX_MULTIPLIER = 10;  // cap growth multiplier at 10×
 
 // ── Award seeds for activity (called internally by other routes) ──────────────
 export async function awardSeeds(userId, amount, reason, client) {
@@ -204,19 +205,31 @@ router.post('/invest', requireAuth, async (req, res) => {
     // Deduct seeds from investor
     await client.query(`UPDATE users SET seeds = seeds - $1 WHERE id=$2`, [amt, req.user.id]);
 
+    // Record target's current seeds so we can calculate return on withdrawal
+    const { rows: [tgtNow] } = await client.query(
+      `SELECT seeds FROM users WHERE id=$1`, [targetId]
+    );
+    const targetSeedsNow = tgtNow?.seeds || 0;
+
     // Upsert investment
     if (existing) {
-      await client.query(`UPDATE stock_investments SET amount = amount + $1 WHERE id=$2`, [amt, existing.id]);
+      // On top-up: weighted average seeds_at_invest
+      const oldAmt = existing.amount || 0;
+      const oldBaseline = existing.seeds_at_invest || targetSeedsNow;
+      const weightedBaseline = Math.round((oldBaseline * oldAmt + targetSeedsNow * amt) / (oldAmt + amt));
+      await client.query(
+        `UPDATE stock_investments SET amount = amount + $1, seeds_at_invest = $2 WHERE id=$3`,
+        [amt, weightedBaseline, existing.id]
+      );
     } else {
       await client.query(
-        `INSERT INTO stock_investments (investor_id, target_id, amount) VALUES ($1,$2,$3)`,
-        [req.user.id, targetId, amt]
+        `INSERT INTO stock_investments (investor_id, target_id, amount, seeds_at_invest) VALUES ($1,$2,$3,$4)`,
+        [req.user.id, targetId, amt, targetSeedsNow]
       );
     }
 
-    // Target gets +5% of invested amount as a small boost
-    const boost = Math.max(1, Math.floor(amt * 0.05));
-    await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [boost, targetId]);
+    // The full investment goes to the target immediately (it's their stake)
+    await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [amt, targetId]);
 
     await client.query('COMMIT');
 
@@ -243,24 +256,47 @@ router.post('/withdraw', requireAuth, async (req, res) => {
     const { targetId } = req.body;
 
     const { rows: [inv] } = await client.query(
-      `SELECT id, amount FROM stock_investments WHERE investor_id=$1 AND target_id=$2 FOR UPDATE`,
+      `SELECT id, amount, seeds_at_invest FROM stock_investments
+       WHERE investor_id=$1 AND target_id=$2 FOR UPDATE`,
       [req.user.id, targetId]
     );
     if (!inv) return res.status(404).json({ error: 'No investment found' });
 
-    const fee    = Math.floor(inv.amount * WITHDRAW_FEE);  // 10% fee
-    const payout = inv.amount - fee;
+    // Get target's current seeds
+    const { rows: [tgtCurrent] } = await client.query(
+      `SELECT seeds FROM users WHERE id=$1`, [targetId]
+    );
+    const currentSeeds  = tgtCurrent?.seeds || 0;
+    const principal     = inv.amount; // what you originally invested
+
+    // Baseline: target's score when you invested. Floor at 10 to prevent div/0.
+    const baseline      = Math.max(10, inv.seeds_at_invest || currentSeeds);
+
+    // Raw multiplier (how much their score changed), capped at 10×, floor at 0
+    const rawMultiplier = currentSeeds / baseline;
+    const multiplier    = Math.min(MAX_MULTIPLIER, Math.max(0, rawMultiplier));
+
+    // Only 50% of your investment tracks the multiplier (active stake).
+    // The other 50% is the safe/inactive half — always returned at face value.
+    const activeHalf    = principal / 2;
+    const safeHalf      = principal - activeHalf;
+    const activeValue   = activeHalf * multiplier;
+    const totalValue    = Math.floor(safeHalf + activeValue);
+
+    // 20% fee on total value — goes to the person you invested in
+    const fee           = Math.floor(totalValue * WITHDRAW_FEE);
+    const payout        = totalValue - fee;
 
     // Return payout to investor
     await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [payout, req.user.id]);
-    // Target keeps the fee (reward for having been invested in)
+    // Target keeps the fee (reward for having been worth investing in)
     await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [fee, targetId]);
     // Remove investment record
     await client.query(`DELETE FROM stock_investments WHERE id=$1`, [inv.id]);
 
     await client.query('COMMIT');
 
-    // Record history for both (fire and forget)
+    // Record history for both
     try {
       const [ir] = (await pool.query(`SELECT seeds FROM users WHERE id=$1`, [req.user.id])).rows;
       const [tr] = (await pool.query(`SELECT seeds FROM users WHERE id=$1`, [targetId])).rows;
@@ -268,7 +304,7 @@ router.post('/withdraw', requireAuth, async (req, res) => {
       if (tr) await pool.query(`INSERT INTO stock_history (user_id, seeds) VALUES ($1,$2)`, [targetId, tr.seeds]);
     } catch (_) {}
 
-    res.json({ ok: true, returned: payout, fee });
+    res.json({ ok: true, returned: payout, principal, fee, multiplier: Math.round(multiplier * 100) / 100, totalValue });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err.message); res.status(500).json({ error: 'Server error' });
