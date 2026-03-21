@@ -289,20 +289,28 @@ function processAction(state, type, payload, userId) {
       return { ok: true };
     }
 
-    // ── Spy Operation ──
-    if (only?.id === 'spy_operation') {
+    // ── Spy Operation (solo or mixed with units) ──
+    const spyCard = cards.find(c => c.id === 'spy_operation');
+    if (spyCard) {
       const sv = Math.max(2, Math.min(5, parseInt(spyValue) || 3));
-      const targetIdx = nextAliveIndex(state, myIdx);
       const chances = { 2:15, 3:25, 4:40, 5:55 };
-      const idx = me.hand.findIndex(c => c.uid === only.uid);
-      me.hand.splice(idx, 1);
-      state.pendingSpy = { senderIdx: myIdx, targetIdx, value: sv, spyChance: chances[sv] };
-      addLog(state, `🕵️ ${me.name} sends Spy Operation (value ${sv}) to ${state.players[targetIdx].name}!`);
-      notify(state, targetIdx, `🕵️ ${me.name} sent you a Spy card (value ${sv}, ${chances[sv]}% spy chance). Deploy or discard?`);
-      state.turnPhase = 'spy_pending';
-      state.turnPlayerIndex = nextAliveIndex(state, myIdx);
-      state.playZone = [];
-      return { ok: true };
+      const spyIdx = me.hand.findIndex(c => c.uid === spyCard.uid);
+      me.hand.splice(spyIdx, 1);
+      const spyTargetIdx = nextAliveIndex(state, myIdx);
+      state.pendingSpy = { senderIdx: myIdx, targetIdx: spyTargetIdx, value: sv, spyChance: chances[sv] };
+      addLog(state, `🕵️ ${me.name} sends Spy Operation (value ${sv}) to ${state.players[spyTargetIdx].name}!`);
+      notify(state, spyTargetIdx, `🕵️ ${me.name} sent you a Spy card (value ${sv}, ${chances[sv]}% spy chance). Deploy or discard?`);
+
+      // If spy was the only card, end turn and let spy phase resolve
+      const unitCards2 = cards.filter(c => c.type === 'unit');
+      if (unitCards2.length === 0) {
+        state.turnPhase = 'spy_pending';
+        state.turnPlayerIndex = nextAliveIndex(state, myIdx);
+        state.playZone = [];
+        return { ok: true };
+      }
+      // Otherwise fall through and also launch the unit attack below
+      // The spy is sent simultaneously; the attack proceeds normally
     }
 
     // ── Normal unit attack ──
@@ -363,13 +371,26 @@ function processAction(state, type, payload, userId) {
         // defCards stays empty → full damage resolved below
       // Divert Attack — player picks new target
       } else if (cards.length === 1 && cards[0].id === 'divert_attack') {
-        const idx = defender.hand.findIndex(c => c.uid === cards[0].uid);
-        defender.hand.splice(idx, 1);
-        state.pendingDivert = { defenderIdx: defMyIdx };
-        state.turnPhase = 'diverting';
-        addLog(state, `↩️ ${defender.name} plays Divert Attack! Choose a new target.`);
-        notify(state, defMyIdx, `↩️ Divert Attack played! Click on a player to redirect the attack to them.`);
-        return { ok: true, needsDivert: true };
+        // Check if there are any valid redirect targets first
+        const validTargets = state.players.filter((p, i) =>
+          !p.eliminated && i !== defMyIdx && i !== state.turnPlayerIndex
+        );
+        if (validTargets.length === 0) {
+          // No one to redirect to — card is wasted, take damage normally
+          addLog(state, `↩️ ${defender.name} tried Divert Attack but there are no valid targets — card wasted!`);
+          notify(state, defMyIdx, `↩️ Divert Attack has no valid targets (only 2 players). Card wasted — taking damage normally.`);
+          const idx = defender.hand.findIndex(c => c.uid === cards[0].uid);
+          if (idx >= 0) defender.hand.splice(idx, 1);
+          // defCards stays empty, full damage below
+        } else {
+          const idx = defender.hand.findIndex(c => c.uid === cards[0].uid);
+          defender.hand.splice(idx, 1);
+          state.pendingDivert = { defenderIdx: defMyIdx };
+          state.turnPhase = 'diverting';
+          addLog(state, `↩️ ${defender.name} plays Divert Attack! Choose a new target.`);
+          notify(state, defMyIdx, `↩️ Divert Attack played! Click on a player to redirect the attack to them.`);
+          return { ok: true, needsDivert: true };
+        }
       } else {
         // Normal defense — slots [0,1]=DEF, [2]=counter
         defCards    = cards.slice(0, 2).filter(c => c.type === 'unit');
@@ -396,24 +417,26 @@ function processAction(state, type, payload, userId) {
       }
     }
 
-    // ── Resolve combat (damaged cards mechanic) ────────────────────────────
+    // ── Resolve combat ─────────────────────────────────────────────────────
     const defTotal = defCards.reduce((s, c) => s + (c.def || 0), 0);
-    const excess   = defTotal - state.attackTotal;
+    const diff     = defTotal - state.attackTotal; // positive = excess defence, negative = damage taken
 
-    if (excess >= 0) {
-      // Defense holds — cards survive but get damaged
+    if (diff > 0) {
+      // DEF EXCEEDS ATK — cards survive but come back damaged (used hard)
       const returned = [];
       for (const card of defCards) {
         const dmg = damageCard(card);
-        if (dmg) {
-          returned.push(dmg);
-        }
+        if (dmg) returned.push(dmg);
       }
       for (const c of returned) defender.hand.push(c);
-      addLog(state, `🛡️ ${defender.name} holds! DEF ${defTotal} vs ATK ${state.attackTotal}. Cards survive (damaged).`);
-      if (returned.length) notify(state, defMyIdx, `🛡️ Defense held! Your cards survived but are damaged: ${returned.map(c=>`${c.name}(${c.atk}/${c.def})`).join(', ')}`);
+      addLog(state, `🛡️ ${defender.name} holds! DEF ${defTotal} > ATK ${state.attackTotal}. Cards return damaged.`);
+      if (returned.length) notify(state, defMyIdx, `🛡️ Defense exceeded the attack! Cards return damaged: ${returned.map(c=>`${c.name} (${c.atk}/${c.def})`).join(', ')}`);
+    } else if (diff === 0) {
+      // EXACTLY BALANCED — defence cards are fully consumed (used up), no hand loss
+      addLog(state, `⚖️ ${defender.name} perfectly blocks! DEF ${defTotal} = ATK ${state.attackTotal}. Cards used up.`);
+      notify(state, defMyIdx, `⚖️ Perfect block! Your DEF exactly matched the ATK ${state.attackTotal}. Defense cards consumed.`);
     } else {
-      // Attack exceeds defense — defense cards are consumed, hand loses extra
+      // ATK EXCEEDS DEF — defence cards consumed AND hand loses extra
       const damage   = state.attackTotal - defTotal;
       const handLoss = Math.min(damage, defender.hand.length);
       const lost     = handLoss > 0 ? defender.hand.splice(0, handLoss) : [];
@@ -489,6 +512,7 @@ function playerView(state, userId) {
     defenseTotal:        state.defenseTotal || 0,
     targetPlayerIndex:   state.targetPlayerIndex,
     pendingDivertForMe:  state.pendingDivert?.defenderIdx === myIdx,
+    blockCommsActive:    !!state.blockCommsNextPlayer,
     pendingSpyForMe:     state.pendingSpy?.targetIdx === myIdx ? { value: state.pendingSpy.value } : null,
     deckCount:           state.deck.length,
     log:                 (state.log  || []).slice(0, 20),
