@@ -247,15 +247,17 @@ router.post('/invest', requireAuth, async (req, res) => {
 });
 
 // ── POST /api/grove/withdraw ──────────────────────────────────────────────────
+// Supports partial withdrawal via optional `withdrawAmount` body field.
+// Partial: shrinks the investment proportionally, keeping seeds_at_invest the same.
+// Full (default): removes the investment record entirely.
 router.post('/withdraw', requireAuth, async (req, res) => {
-  const { targetId } = req.body;
+  const { targetId, withdrawAmount } = req.body;
   if (!targetId) return res.status(400).json({ error: 'targetId is required' });
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // Lock investment row — prevents double-withdrawal
     const { rows: [inv] } = await client.query(
       `SELECT id, amount, seeds_at_invest FROM stock_investments
        WHERE investor_id=$1 AND target_id=$2 FOR UPDATE`,
@@ -266,36 +268,50 @@ router.post('/withdraw', requireAuth, async (req, res) => {
       return res.status(404).json({ error: 'No investment found' });
     }
 
-    // Lock target row
     const { rows: [tgtCurrent] } = await client.query(
       `SELECT seeds FROM users WHERE id=$1 FOR UPDATE`, [targetId]
     );
     const currentSeeds = tgtCurrent?.seeds || 0;
-    const principal    = inv.amount;
+    const totalPrincipal = inv.amount;
 
-    // Baseline = seeds AFTER investment landed (dupe fix ensures this)
-    // Floor at 10 to prevent div/0
-    const baseline   = Math.max(10, inv.seeds_at_invest || currentSeeds);
+    // How much to withdraw — defaults to full amount
+    const requestedAmt = withdrawAmount ? Math.floor(Number(withdrawAmount)) : totalPrincipal;
+    if (requestedAmt < 1 || requestedAmt > totalPrincipal) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: `Withdraw between 1 and ${totalPrincipal} seeds` });
+    }
 
-    // Multiplier: organic growth beyond the baseline, capped at 10×
+    const isPartial = requestedAmt < totalPrincipal;
+    // Proportion being withdrawn (1.0 = full, 0.5 = half etc.)
+    const fraction  = requestedAmt / totalPrincipal;
+    // Principal portion being cashed out
+    const principal = Math.floor(totalPrincipal * fraction);
+
+    const baseline      = Math.max(10, inv.seeds_at_invest || currentSeeds);
     const rawMultiplier = currentSeeds / baseline;
     const multiplier    = Math.min(MAX_MULTIPLIER, Math.max(0, rawMultiplier));
 
-    // safe half  → always returned at face value
-    // active half → multiplied; 20% fee on this portion only
     const activeHalf  = Math.floor(principal / 2);
     const safeHalf    = principal - activeHalf;
     const activeValue = Math.floor(activeHalf * multiplier);
     const fee         = Math.floor(activeValue * WITHDRAW_FEE);
     const payout      = safeHalf + activeValue - fee;
 
+    // Return payout to investor
     await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [payout, req.user.id]);
-
-    // Deduct original principal from target, then give them the fee as reward
+    // Deduct principal portion from target, give fee back as reward
     await client.query(`UPDATE users SET seeds = GREATEST(0, seeds - $1) WHERE id=$2`, [principal, targetId]);
     await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [fee, targetId]);
 
-    await client.query(`DELETE FROM stock_investments WHERE id=$1`, [inv.id]);
+    if (isPartial) {
+      // Shrink investment — seeds_at_invest stays the same (same multiplier curve)
+      const remaining = totalPrincipal - principal;
+      await client.query(
+        `UPDATE stock_investments SET amount = $1 WHERE id=$2`, [remaining, inv.id]
+      );
+    } else {
+      await client.query(`DELETE FROM stock_investments WHERE id=$1`, [inv.id]);
+    }
 
     await client.query('COMMIT');
 
@@ -306,7 +322,13 @@ router.post('/withdraw', requireAuth, async (req, res) => {
       if (tr) await pool.query(`INSERT INTO stock_history (user_id, seeds) VALUES ($1,$2)`, [targetId, tr.seeds]);
     } catch (_) {}
 
-    res.json({ ok: true, returned: payout, principal, fee, multiplier: Math.round(multiplier * 100) / 100, activeValue, safeHalf });
+    res.json({
+      ok: true, returned: payout, principal, fee,
+      multiplier: Math.round(multiplier * 100) / 100,
+      activeValue, safeHalf,
+      remainingInvestment: isPartial ? totalPrincipal - principal : 0,
+      partial: isPartial,
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err.message);
