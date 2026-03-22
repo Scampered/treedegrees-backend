@@ -16,7 +16,6 @@ export async function awardSeeds(userId, amount, reason, client) {
   );
   if (!updated) return;
 
-  // History always written via pool directly (fire-and-forget, never blocks the caller)
   try {
     await pool.query(
       `INSERT INTO stock_history (user_id, seeds) VALUES ($1, $2)`,
@@ -30,22 +29,23 @@ export async function awardSeeds(userId, amount, reason, client) {
   } catch (_) {}
 }
 
-// ── Lazy history sampler — at most one snapshot per 30 min ───────────────────
-async function maybeSampleHistory(userId) {
+// ── Lazy history sampler ──────────────────────────────────────────────────────
+// intervalMs: how long to wait before inserting a new snapshot (default 30 min)
+async function maybeSampleHistory(userId, intervalMs = 30 * 60 * 1000) {
   const { rows: [last] } = await pool.query(
     `SELECT sampled_at FROM stock_history WHERE user_id=$1 ORDER BY sampled_at DESC LIMIT 1`,
     [userId]
   );
   const nowMs  = Date.now();
   const lastMs = last ? new Date(last.sampled_at).getTime() : 0;
-  if (nowMs - lastMs < 30 * 60 * 1000) return;
+  if (nowMs - lastMs < intervalMs) return;
 
   const { rows: [u] } = await pool.query(`SELECT seeds FROM users WHERE id=$1`, [userId]);
   if (!u) return;
   await pool.query(`INSERT INTO stock_history (user_id, seeds) VALUES ($1, $2)`, [userId, u.seeds]);
   await pool.query(
     `DELETE FROM stock_history WHERE user_id=$1 AND id NOT IN (
-       SELECT id FROM stock_history WHERE user_id=$1 ORDER BY sampled_at DESC LIMIT 48
+       SELECT id FROM stock_history WHERE user_id=$1 ORDER BY sampled_at DESC LIMIT 96
      )`, [userId]
   );
 }
@@ -157,18 +157,15 @@ router.get('/connections', requireAuth, async (req, res) => {
 
 // ── POST /api/grove/invest ────────────────────────────────────────────────────
 router.post('/invest', requireAuth, async (req, res) => {
-  // FIX: validate inputs BEFORE opening a transaction so we never leave
-  // a dangling BEGIN with no COMMIT/ROLLBACK on early validation failures.
   const { targetId, amount } = req.body;
   const amt = Math.floor(Number(amount));
-  if (!targetId || amt < 10)   return res.status(400).json({ error: 'Minimum investment is 10 seeds' });
+  if (!targetId || amt < 10)    return res.status(400).json({ error: 'Minimum investment is 10 seeds' });
   if (targetId === req.user.id) return res.status(400).json({ error: 'Cannot invest in yourself' });
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // Verify friendship
     const [u1, u2] = [req.user.id, targetId].sort();
     const { rows: friendRows } = await client.query(
       `SELECT 1 FROM friendships WHERE user_id_1=$1 AND user_id_2=$2 AND status='accepted'`, [u1, u2]
@@ -178,7 +175,7 @@ router.post('/invest', requireAuth, async (req, res) => {
       return res.status(403).json({ error: 'Can only invest in direct connections' });
     }
 
-    // Lock investor row — prevents double-spend from concurrent requests by same user
+    // Lock investor row
     const { rows: [investor] } = await client.query(
       `SELECT seeds FROM users WHERE id=$1 FOR UPDATE`, [req.user.id]
     );
@@ -187,15 +184,13 @@ router.post('/invest', requireAuth, async (req, res) => {
       return res.status(400).json({ error: `Not enough seeds (you have ${investor.seeds})` });
     }
 
-    // FIX: lock target row so concurrent investors record the correct baseline
-    // and seed updates don't race each other
+    // Lock target row
     const { rows: [tgtLocked] } = await client.query(
       `SELECT seeds FROM users WHERE id=$1 FOR UPDATE`, [targetId]
     );
-    const targetSeedsNow = tgtLocked?.seeds || 0;
+    const targetSeedsBefore = tgtLocked?.seeds || 0;
 
-    // FIX: lock investment row to prevent two simultaneous top-ups both reading
-    // existing=null and both trying to INSERT (would crash on unique constraint)
+    // Lock investment row to prevent concurrent top-up race
     const { rows: [existing] } = await client.query(
       `SELECT id, amount, seeds_at_invest FROM stock_investments
        WHERE investor_id=$1 AND target_id=$2 FOR UPDATE`,
@@ -205,32 +200,37 @@ router.post('/invest', requireAuth, async (req, res) => {
     // Deduct seeds from investor
     await client.query(`UPDATE users SET seeds = seeds - $1 WHERE id=$2`, [amt, req.user.id]);
 
+    // Add investment to target
+    await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [amt, targetId]);
+
+    // DUPE FIX: seeds_at_invest is recorded AFTER the investment lands on the target.
+    // Before this fix it was recorded before, making the multiplier immediately 2× when
+    // you invested into someone (their seeds doubled from your investment, baseline was pre-invest).
+    // Now the baseline = targetSeedsBefore + amt, so multiplier starts at 1.0 and only
+    // grows if the target earns seeds organically beyond what you gave them.
+    const baselineAfterInvest = targetSeedsBefore + amt;
+
     if (existing) {
-      // Top-up: recalculate weighted average baseline so multiplier stays accurate
+      // Top-up: weighted average baseline — new money also uses post-invest baseline
       const oldAmt      = existing.amount || 0;
-      const oldBaseline = existing.seeds_at_invest || targetSeedsNow;
+      const oldBaseline = existing.seeds_at_invest || baselineAfterInvest;
       const weightedBaseline = Math.round(
-        (oldBaseline * oldAmt + targetSeedsNow * amt) / (oldAmt + amt)
+        (oldBaseline * oldAmt + baselineAfterInvest * amt) / (oldAmt + amt)
       );
       await client.query(
         `UPDATE stock_investments SET amount = amount + $1, seeds_at_invest = $2 WHERE id=$3`,
         [amt, weightedBaseline, existing.id]
       );
     } else {
-      // First investment: snapshot target's seeds RIGHT NOW as the growth baseline
       await client.query(
         `INSERT INTO stock_investments (investor_id, target_id, amount, seeds_at_invest)
          VALUES ($1, $2, $3, $4)`,
-        [req.user.id, targetId, amt, targetSeedsNow]
+        [req.user.id, targetId, amt, baselineAfterInvest]
       );
     }
 
-    // Full investment amount goes to target immediately
-    await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [amt, targetId]);
-
     await client.query('COMMIT');
 
-    // Record history snapshots for both parties (after commit, fire-and-forget)
     try {
       const [invRow] = (await pool.query(`SELECT seeds FROM users WHERE id=$1`, [req.user.id])).rows;
       const [tgtRow] = (await pool.query(`SELECT seeds FROM users WHERE id=$1`, [targetId])).rows;
@@ -248,7 +248,6 @@ router.post('/invest', requireAuth, async (req, res) => {
 
 // ── POST /api/grove/withdraw ──────────────────────────────────────────────────
 router.post('/withdraw', requireAuth, async (req, res) => {
-  // FIX: validate input before opening a transaction
   const { targetId } = req.body;
   if (!targetId) return res.status(400).json({ error: 'targetId is required' });
 
@@ -256,7 +255,7 @@ router.post('/withdraw', requireAuth, async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Lock the investment row — prevents double-withdrawal from concurrent requests
+    // Lock investment row — prevents double-withdrawal
     const { rows: [inv] } = await client.query(
       `SELECT id, amount, seeds_at_invest FROM stock_investments
        WHERE investor_id=$1 AND target_id=$2 FOR UPDATE`,
@@ -267,58 +266,39 @@ router.post('/withdraw', requireAuth, async (req, res) => {
       return res.status(404).json({ error: 'No investment found' });
     }
 
-    // Lock target row before reading seeds — ensures consistent deduction
+    // Lock target row
     const { rows: [tgtCurrent] } = await client.query(
       `SELECT seeds FROM users WHERE id=$1 FOR UPDATE`, [targetId]
     );
     const currentSeeds = tgtCurrent?.seeds || 0;
     const principal    = inv.amount;
 
-    // Baseline: what the target's seeds were when you invested (floor at 10 to prevent div/0)
-    // If seeds_at_invest is 0 (pre-migration or reset by v17), fall back to currentSeeds
-    // which gives multiplier=1 — honest "no measured growth" behaviour
+    // Baseline = seeds AFTER investment landed (dupe fix ensures this)
+    // Floor at 10 to prevent div/0
     const baseline   = Math.max(10, inv.seeds_at_invest || currentSeeds);
 
-    // Multiplier: how much target has grown since investment, capped at 10×, floor at 0
+    // Multiplier: organic growth beyond the baseline, capped at 10×
     const rawMultiplier = currentSeeds / baseline;
     const multiplier    = Math.min(MAX_MULTIPLIER, Math.max(0, rawMultiplier));
 
-    // Payout calculation:
-    //   safe half  → always returned at face value, no fee
-    //   active half → grows with multiplier; 20% fee on this portion only
-    //
-    // Example: invest 40 @ baseline 124, current 155 (×1.25):
-    //   safeHalf=20, activeValue=25, fee=5, payout = 20+25-5 = 40
+    // safe half  → always returned at face value
+    // active half → multiplied; 20% fee on this portion only
     const activeHalf  = Math.floor(principal / 2);
     const safeHalf    = principal - activeHalf;
     const activeValue = Math.floor(activeHalf * multiplier);
     const fee         = Math.floor(activeValue * WITHDRAW_FEE);
     const payout      = safeHalf + activeValue - fee;
 
-    // Give investor their payout
-    await client.query(
-      `UPDATE users SET seeds = seeds + $1 WHERE id=$2`,
-      [payout, req.user.id]
-    );
+    await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [payout, req.user.id]);
 
-    // Deduct principal from target (they held it during the investment period),
-    // then add the fee back as their reward for growing.
-    // GREATEST(0,...) is a safety net — should never be needed if data is consistent.
-    await client.query(
-      `UPDATE users SET seeds = GREATEST(0, seeds - $1) WHERE id=$2`,
-      [principal, targetId]
-    );
-    await client.query(
-      `UPDATE users SET seeds = seeds + $1 WHERE id=$2`,
-      [fee, targetId]
-    );
+    // Deduct original principal from target, then give them the fee as reward
+    await client.query(`UPDATE users SET seeds = GREATEST(0, seeds - $1) WHERE id=$2`, [principal, targetId]);
+    await client.query(`UPDATE users SET seeds = seeds + $1 WHERE id=$2`, [fee, targetId]);
 
-    // Remove the investment record
     await client.query(`DELETE FROM stock_investments WHERE id=$1`, [inv.id]);
 
     await client.query('COMMIT');
 
-    // Record history snapshots for both parties (after commit, fire-and-forget)
     try {
       const [ir] = (await pool.query(`SELECT seeds FROM users WHERE id=$1`, [req.user.id])).rows;
       const [tr] = (await pool.query(`SELECT seeds FROM users WHERE id=$1`, [targetId])).rows;
@@ -326,15 +306,7 @@ router.post('/withdraw', requireAuth, async (req, res) => {
       if (tr) await pool.query(`INSERT INTO stock_history (user_id, seeds) VALUES ($1,$2)`, [targetId, tr.seeds]);
     } catch (_) {}
 
-    res.json({
-      ok: true,
-      returned:   payout,
-      principal,
-      fee,
-      multiplier: Math.round(multiplier * 100) / 100,
-      activeValue,
-      safeHalf,
-    });
+    res.json({ ok: true, returned: payout, principal, fee, multiplier: Math.round(multiplier * 100) / 100, activeValue, safeHalf });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err.message);
@@ -366,23 +338,29 @@ router.get('/leaderboard', requireAuth, async (req, res) => {
   } catch (err) { console.error(err.message); res.status(500).json({ error: 'Server error' }); }
 });
 
-// ── GET /api/grove/history/:userId ───────────────────────────────────────────
+// ── GET /api/grove/history/:userId?window=1h|12h|1d|1w ───────────────────────
 router.get('/history/:userId', requireAuth, async (req, res) => {
   try {
     const { userId } = req.params;
     const win = req.query.window || '1d';
 
-    const windowMs = win === '12h' ? 12*3600*1000
+    const windowMs = win === '1h'  ? 3600*1000
+                   : win === '12h' ? 12*3600*1000
                    : win === '1w'  ? 7*24*3600*1000
                    :                 24*3600*1000;
 
-    // Only the user themselves or a direct connection can view history
     if (userId !== req.user.id) {
       const [u1, u2] = [req.user.id, userId].sort();
       const { rows } = await pool.query(
         `SELECT 1 FROM friendships WHERE user_id_1=$1 AND user_id_2=$2 AND status='accepted'`, [u1, u2]
       );
       if (rows.length === 0) return res.status(403).json({ error: 'Not a direct connection' });
+    }
+
+    // For 1h window, trigger a fine-grained sample (5 min throttle) so the chart
+    // has enough points to show meaningful movement within the hour
+    if (win === '1h') {
+      try { await maybeSampleHistory(userId, 5 * 60 * 1000); } catch (_) {}
     }
 
     const since = new Date(Date.now() - windowMs).toISOString();
@@ -403,7 +381,6 @@ router.get('/history/:userId', requireAuth, async (req, res) => {
         { seeds: u?.seeds || 0, ts: now },
       ];
     } else {
-      // Always pin the most recent point to right now
       data.push({ seeds: u?.seeds || 0, ts: now });
     }
 
