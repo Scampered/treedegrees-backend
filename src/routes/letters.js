@@ -313,42 +313,36 @@ router.patch('/:id/arrived', requireAuth, async (req, res) => {
     );
     if (!letter) return res.status(404).json({ error: 'Letter not found or not yet arrived' });
 
+    // Streak math is handled entirely by calculateEffectiveStreak at day boundaries.
+    // arrived only awards seeds — the sender already marked their sent_today flag at send time.
+    await awardSeeds(letter.recipient_id, 30, 'receive_letter', client);
+
+    // Read current streak to return to frontend
     const [uid1, uid2] = [letter.sender_id, letter.recipient_id].sort();
     const raw = await getStreak(client, letter.sender_id, letter.recipient_id);
     const today = new Date().toLocaleDateString('sv-SE');
     const streak = calculateEffectiveStreak(raw, today);
-
-    // Add +1 fuel on arrival (capped at 3)
-    const newFuel = Math.min(3, (streak.fuel || 0) + 1);
-
-    // Check if arrival completes a "both sent today" — if so, increment streak now
-    const isRecipUser1 = letter.recipient_id === uid1;
-    const u1SentNow = isRecipUser1 ? true : (streak.user1_sent_today || false);
-    const u2SentNow = !isRecipUser1 ? true : (streak.user2_sent_today || false);
-    const bothSentNow = u1SentNow && u2SentNow;
-    // Only increment if we weren't already both-sent (prevent double-increment)
-    const wasAlreadyBothSent = (streak.user1_sent_today || false) && (streak.user2_sent_today || false);
-    const newStreakDays = (bothSentNow && !wasAlreadyBothSent)
-      ? (streak.streak_days || 0) + 1
-      : (streak.streak_days || 0);
-
-    // Award seeds to recipient for receiving a letter
-    await awardSeeds(letter.recipient_id, 30, 'receive_letter', client);
-    // Bonus seeds for streak milestone
-    if (bothSentNow && !wasAlreadyBothSent) {
-      await awardSeeds(letter.recipient_id, 15, 'streak_milestone', client);
-      await awardSeeds(letter.sender_id, 15, 'streak_milestone', client);
+    if (streak._dirty) {
+      await upsertStreak(client, uid1, uid2, streak);
     }
 
-    await upsertStreak(client, uid1, uid2, {
-      streak_days: newStreakDays,
-      fuel: newFuel,
-      last_day_processed: today,
-      user1_sent_today: u1SentNow,
-      user2_sent_today: u2SentNow,
-    });
+    // Bonus seeds if both sent today (only once — check wasAlready flag)
+    const isRecipUser1 = letter.recipient_id === uid1;
+    const senderIsUser1 = !isRecipUser1;
+    const senderSentFlag  = senderIsUser1 ? streak.user1_sent_today : streak.user2_sent_today;
+    const recipSentFlag   = isRecipUser1  ? streak.user1_sent_today : streak.user2_sent_today;
+    if (senderSentFlag && recipSentFlag) {
+      // Both have sent today — award milestone bonus once per pair per day
+      // Store a "milestone_awarded" flag to prevent double award: use a simple check
+      // We award bonus only if the letter is the one that COMPLETED the pair
+      // i.e. the recipient hasn't sent yet (this is the sender's letter arriving)
+      if (!recipSentFlag) {
+        await awardSeeds(letter.recipient_id, 15, 'streak_milestone', client);
+        await awardSeeds(letter.sender_id, 15, 'streak_milestone', client);
+      }
+    }
 
-    res.json({ fuel: newFuel, streakDays: newStreakDays });
+    res.json({ fuel: streak.fuel, streakDays: streak.streak_days });
   } catch (err) {
     console.error('Arrived error:', err.message);
     res.status(500).json({ error: 'Server error' });

@@ -64,8 +64,8 @@ export function calcDeliveryMs(distKm, vehicleTier) {
 // When user2 sends on the same local date as user1's current_period, both-sent = true.
 
 export function calculateEffectiveStreak(record, todayStr) {
-  // todayStr: caller passes the CURRENT date in whatever timezone is relevant
-  // For lazy evaluation (no active sender), we use UTC date
+  // todayStr: caller passes the CURRENT date in local time (YYYY-MM-DD).
+  // Falls back to server UTC date if not provided.
   const today = todayStr || new Date().toISOString().split('T')[0]
 
   if (!record) {
@@ -83,6 +83,8 @@ export function calculateEffectiveStreak(record, todayStr) {
   if (lastProcessed === today) return record
 
   let { streak_days, fuel, user1_sent_today, user2_sent_today } = record
+  streak_days = streak_days || 0
+  fuel        = fuel        || 0
 
   const daysDiff = Math.max(0, Math.floor(
     (new Date(today) - new Date(lastProcessed)) / 86400000
@@ -90,12 +92,29 @@ export function calculateEffectiveStreak(record, todayStr) {
 
   for (let i = 0; i < daysDiff; i++) {
     if (i === 0) {
-      // Yesterday's resolution: if both sent, increment streak
-      if (user1_sent_today && user2_sent_today) streak_days += 1
+      // Resolve the last active day
+      if (user1_sent_today && user2_sent_today) {
+        // Both sent — increment streak AND earn 1 fuel (Snapchat-style)
+        streak_days += 1
+        fuel = Math.min(3, fuel + 1)
+      } else {
+        // At least one didn't send — spend 1 fuel (streak save)
+        if (fuel > 0) {
+          fuel -= 1
+          // streak_days is preserved — the save was used
+        } else {
+          // No fuel left — streak breaks
+          streak_days = 0
+        }
+      }
+    } else {
+      // Additional missed days beyond the first
+      if (fuel > 0) {
+        fuel -= 1
+      } else {
+        streak_days = 0
+      }
     }
-    // Each elapsed day burns 1 fuel
-    fuel = Math.max(0, fuel - 1)
-    if (fuel === 0) streak_days = 0
     user1_sent_today = false
     user2_sent_today = false
   }
