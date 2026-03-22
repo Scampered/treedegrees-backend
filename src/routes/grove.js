@@ -345,6 +345,7 @@ router.get('/history/:userId', requireAuth, async (req, res) => {
     const win = req.query.window || '1d';
 
     const windowMs = win === '1h'  ? 3600*1000
+                   : win === '6h'  ? 6*3600*1000
                    : win === '12h' ? 12*3600*1000
                    : win === '1w'  ? 7*24*3600*1000
                    :                 24*3600*1000;
@@ -359,7 +360,7 @@ router.get('/history/:userId', requireAuth, async (req, res) => {
 
     // For 1h window, trigger a fine-grained sample (5 min throttle) so the chart
     // has enough points to show meaningful movement within the hour
-    if (win === '1h') {
+    if (win === '1h' || win === '6h') {
       try { await maybeSampleHistory(userId, 5 * 60 * 1000); } catch (_) {}
     }
 
