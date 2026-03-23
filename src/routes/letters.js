@@ -306,17 +306,22 @@ router.patch('/:id/arrived', requireAuth, async (req, res) => {
   const client = await pool.connect();
   try {
     // Verify this letter exists and the viewer is the RECIPIENT
+    // Mark seeds as awarded atomically — prevents double-award if called twice
     const { rows: [letter] } = await client.query(
-      `SELECT sender_id, recipient_id, arrives_at, COALESCE(distance_km, 0) AS distance_km FROM letters
-       WHERE id=$1 AND recipient_id=$2 AND arrives_at <= NOW()`,
+      `UPDATE letters SET seeds_awarded = true
+       WHERE id=$1 AND recipient_id=$2 AND arrives_at <= NOW() AND seeds_awarded = false
+       RETURNING sender_id, recipient_id, COALESCE(distance_km, 0) AS distance_km`,
       [req.params.id, req.user.id]
     );
-    if (!letter) return res.status(404).json({ error: 'Letter not found or not yet arrived' });
+    if (!letter) {
+      // Either already awarded, not arrived yet, or not found — all safe to return 404
+      return res.status(404).json({ error: 'Letter not found, not yet arrived, or already processed' });
+    }
 
     // Distance-based seed reward — sqrt curve, 50km→6/12, 20037km→40/60
     const MAX_KM    = 20037;
     const distKm    = Math.min(letter.distance_km || 0, MAX_KM);
-    const ratio     = Math.sqrt(distKm / MAX_KM);
+    const ratio     = Math.sqrt(Math.max(0, distKm) / MAX_KM);
     const seedsSender   = 5  + Math.floor(ratio * 35);  // 5–40
     const seedsReceiver = 10 + Math.floor(ratio * 50);  // 10–60
 
