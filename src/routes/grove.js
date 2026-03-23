@@ -391,7 +391,7 @@ router.get('/history/:userId', requireAuth, async (req, res) => {
     }
 
     // Trigger sampling based on window size to ensure enough data points
-    if (win === '1h')       { try { await maybeSampleHistory(userId, 2 * 60 * 1000); } catch (_) {} }   // 2-min throttle for 1h
+    if (win === '1h')       { try { await maybeSampleHistory(userId, 1 * 60 * 1000); } catch (_) {} }   // 1-min throttle for 1h
     else if (win === '6h')  { try { await maybeSampleHistory(userId, 10 * 60 * 1000); } catch (_) {} }  // 10-min throttle for 6h
     else if (win === '12h') { try { await maybeSampleHistory(userId, 20 * 60 * 1000); } catch (_) {} }  // 20-min throttle for 12h
 
