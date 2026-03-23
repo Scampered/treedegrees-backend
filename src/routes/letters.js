@@ -307,31 +307,45 @@ router.get('/streaks', requireAuth, async (req, res) => {
 // Called by the frontend when the letter's arrivesAt timestamp is crossed
 router.patch('/:id/arrived', requireAuth, async (req, res) => {
   try {
-    // Atomic UPDATE — marks seeds_awarded=true only once, returns nothing if already done
+    console.log(`[arrived] called — letterId=${req.params.id} userId=${req.user.id}`);
+
+    // First check what the letter looks like before the UPDATE
+    const { rows: [check] } = await pool.query(
+      `SELECT id, sender_id, recipient_id, arrives_at, seeds_awarded, delivery_ms, distance_km
+       FROM letters WHERE id=$1`,
+      [req.params.id]
+    );
+    console.log(`[arrived] letter lookup:`, check
+      ? `found, recipient=${check.recipient_id}, arrives_at=${check.arrives_at}, seeds_awarded=${check.seeds_awarded}, delivery_ms=${check.delivery_ms}`
+      : 'NOT FOUND'
+    );
+
     const { rows: [letter] } = await pool.query(
       `UPDATE letters SET seeds_awarded = true
        WHERE id=$1 AND recipient_id=$2 AND arrives_at <= NOW() AND (seeds_awarded = false OR seeds_awarded IS NULL)
        RETURNING sender_id, recipient_id, COALESCE(distance_km, 0) AS distance_km, COALESCE(delivery_ms, 0) AS delivery_ms`,
       [req.params.id, req.user.id]
     );
-    if (!letter) return res.status(404).json({ error: 'Already processed or not found' });
 
-    // Time-based seed reward — longer delivery = more seeds
-    // Rewards patience and distance without being gameable by vehicle upgrades
-    // (faster vehicle on same route = less reward, balancing the system)
-    const MAX_MS        = 72 * 3600 * 1000; // 72h cap
+    if (!letter) {
+      console.log(`[arrived] UPDATE returned no rows — already awarded, wrong recipient, or not yet arrived`);
+      return res.status(404).json({ error: 'Already processed or not found' });
+    }
+
+    const MAX_MS        = 72 * 3600 * 1000;
     const delivMs       = Math.max(30000, Math.min(letter.delivery_ms || 0, MAX_MS));
     const ratio         = Math.sqrt(delivMs / MAX_MS);
-    const seedsSender   = 5  + Math.floor(ratio * 35); // 5–40
-    const seedsReceiver = 10 + Math.floor(ratio * 50); // 10–60
+    const seedsSender   = 5  + Math.floor(ratio * 35);
+    const seedsReceiver = 10 + Math.floor(ratio * 50);
 
-    // Award seeds
+    console.log(`[arrived] awarding — sender=${letter.sender_id} +${seedsSender}, recipient=${letter.recipient_id} +${seedsReceiver}, delivMs=${delivMs}, ratio=${ratio.toFixed(3)}`);
+
     await awardSeeds(letter.sender_id,    seedsSender,   'send_letter');
     await awardSeeds(letter.recipient_id, seedsReceiver, 'receive_letter');
-    // Background push to recipient (works even if app is closed)
-    sendPush(letter.recipient_id, '✉️ Letter arrived!', `You received a letter — open it now!`, '/letters').catch(()=>{});
 
-    // Return streak info
+    console.log(`[arrived] seeds awarded OK`);
+    sendPush(letter.recipient_id, '✉️ Letter arrived!', `You received a letter!`, '/letters').catch(()=>{});
+
     const [uid1, uid2] = [letter.sender_id, letter.recipient_id].sort();
     const raw    = await pool.query(
       `SELECT * FROM letter_streaks WHERE user_id_1=$1 AND user_id_2=$2`, [uid1, uid2]
@@ -341,7 +355,7 @@ router.patch('/:id/arrived', requireAuth, async (req, res) => {
     res.json({ fuel: streak.fuel || 0, streakDays: streak.streak_days || 0,
                seedsSender, seedsReceiver });
   } catch (err) {
-    console.error('Arrived error:', err.message);
+    console.error('[arrived] ERROR:', err.message, err.stack);
     res.status(500).json({ error: 'Server error' });
   }
 });
