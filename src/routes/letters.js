@@ -155,6 +155,7 @@ router.get('/', requireAuth, async (req, res) => {
       `SELECT
         l.id, l.content, l.vehicle_tier, l.sent_at, l.arrives_at, l.opened_at, l.expires_at,
         l.sender_id, l.recipient_id, l.streak_at_send,
+        COALESCE(l.seeds_awarded, false) AS seeds_awarded,
         COALESCE(su.nickname, split_part(su.full_name,' ',1)) AS sender_own_nick,
         COALESCE(ru.nickname, split_part(ru.full_name,' ',1)) AS recipient_own_nick
        FROM letters l
@@ -180,6 +181,7 @@ router.get('/', requireAuth, async (req, res) => {
       streakAtSend: l.streak_at_send,
       inTransit: new Date(l.arrives_at) > now,
       isInbox: l.recipient_id === req.user.id,
+      seedsAwarded: l.seeds_awarded || false,
       senderId: l.sender_id,
       recipientId: l.recipient_id,
       // Use viewer's personal nickname for the other party if set
