@@ -7,6 +7,7 @@ import {
   calculateEffectiveStreak, VEHICLE_TIERS, nextVehicleMilestone, formatDuration,
 } from '../utils/letters.js';
 import { awardSeeds } from './grove.js';
+import { sendPush } from '../utils/push.js';
 
 const router = Router();
 
@@ -321,9 +322,11 @@ router.patch('/:id/arrived', requireAuth, async (req, res) => {
     const seedsSender   = 5  + Math.floor(ratio * 35);
     const seedsReceiver = 10 + Math.floor(ratio * 50);
 
-    // Award seeds — two simple UPDATE queries, no transaction needed
+    // Award seeds
     await awardSeeds(letter.sender_id,    seedsSender,   'send_letter');
     await awardSeeds(letter.recipient_id, seedsReceiver, 'receive_letter');
+    // Background push to recipient (works even if app is closed)
+    sendPush(letter.recipient_id, '✉️ Letter arrived!', `You received a letter — open it now!`, '/letters').catch(()=>{});
 
     // Return streak info
     const [uid1, uid2] = [letter.sender_id, letter.recipient_id].sort();
