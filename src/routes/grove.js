@@ -2,6 +2,7 @@
 import { Router } from 'express';
 import pool from '../db/pool.js';
 import { requireAuth } from '../middleware/auth.js';
+import { onGroveInvestment, onGroveWithdrawal } from '../utils/marketEvents.js';
 
 const router = Router();
 const MAX_MULTIPLIER  = 10;   // cap growth multiplier at 10×
@@ -245,6 +246,7 @@ router.post('/invest', requireAuth, async (req, res) => {
       if (tgtRow) await pool.query(`INSERT INTO stock_history (user_id, seeds) VALUES ($1,$2)`, [targetId, tgtRow.seeds]);
     } catch (_) {}
 
+    onGroveInvestment(amt); // fire-and-forget market event
     res.json({ ok: true, invested: amt, newBalance: investor.seeds - amt });
   } catch (err) {
     await client.query('ROLLBACK');

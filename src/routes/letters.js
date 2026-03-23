@@ -7,6 +7,7 @@ import {
   calculateEffectiveStreak, VEHICLE_TIERS, nextVehicleMilestone, formatDuration,
 } from '../utils/letters.js';
 import { awardSeeds } from './grove.js';
+import { onLetterSent, onLetterArrived, onStreakMilestone } from '../utils/marketEvents.js';
 
 const router = Router();
 
@@ -126,6 +127,7 @@ router.post('/', requireAuth, async (req, res) => {
 
     // Seeds awarded on ARRIVAL only (both sender and receiver) — prevents farming
     // distKm is available here and stored in the letter for arrival lookup
+    onLetterSent(distKm); // fire-and-forget market event
     res.status(201).json({
       id: letter.id, sentAt: letter.sent_at,
       arrivesAt: letter.arrives_at, vehicleTier: letter.vehicle_tier,
@@ -328,6 +330,7 @@ router.patch('/:id/arrived', requireAuth, async (req, res) => {
     // Award both sender and receiver on arrival
     await awardSeeds(letter.sender_id,    seedsSender,   'send_letter',    client);
     await awardSeeds(letter.recipient_id, seedsReceiver, 'receive_letter', client);
+    onLetterArrived(); // fire-and-forget
 
     // Read current streak to return to frontend
     const [uid1, uid2] = [letter.sender_id, letter.recipient_id].sort();
