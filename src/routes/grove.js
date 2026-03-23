@@ -2,7 +2,6 @@
 import { Router } from 'express';
 import pool from '../db/pool.js';
 import { requireAuth } from '../middleware/auth.js';
-import { onGroveInvestment, onGroveWithdrawal } from '../utils/marketEvents.js';
 
 const router = Router();
 const MAX_MULTIPLIER  = 10;   // cap growth multiplier at 10×
@@ -17,24 +16,13 @@ function withdrawFeeRate(principal) {
 
 // ── Award seeds for activity (called internally by other routes) ──────────────
 export async function awardSeeds(userId, amount, reason, client) {
+  // Simple single-query award — history is captured by the lazy sampler (maybeSampleHistory)
+  // Not recording history here keeps each call to exactly 1 DB query
   const db = client || pool;
-  const { rows: [updated] } = await db.query(
-    `UPDATE users SET seeds = GREATEST(0, COALESCE(seeds, 0) + $1) WHERE id = $2 RETURNING seeds`,
+  await db.query(
+    `UPDATE users SET seeds = GREATEST(0, COALESCE(seeds, 0) + $1) WHERE id = $2`,
     [amount, userId]
   );
-  if (!updated) return;
-
-  try {
-    await pool.query(
-      `INSERT INTO stock_history (user_id, seeds) VALUES ($1, $2)`,
-      [userId, updated.seeds]
-    );
-    pool.query(
-      `DELETE FROM stock_history WHERE user_id=$1 AND id NOT IN (
-         SELECT id FROM stock_history WHERE user_id=$1 ORDER BY sampled_at DESC LIMIT 48
-       )`, [userId]
-    ).catch(() => {});
-  } catch (_) {}
 }
 
 // ── Lazy history sampler ──────────────────────────────────────────────────────
@@ -246,7 +234,6 @@ router.post('/invest', requireAuth, async (req, res) => {
       if (tgtRow) await pool.query(`INSERT INTO stock_history (user_id, seeds) VALUES ($1,$2)`, [targetId, tgtRow.seeds]);
     } catch (_) {}
 
-    onGroveInvestment(amt); // fire-and-forget market event
     res.json({ ok: true, invested: amt, newBalance: investor.seeds - amt });
   } catch (err) {
     await client.query('ROLLBACK');
