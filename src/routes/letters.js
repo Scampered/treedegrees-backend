@@ -105,7 +105,7 @@ router.post('/', requireAuth, async (req, res) => {
       `INSERT INTO letters (sender_id, recipient_id, content, vehicle_tier, arrives_at, expires_at, streak_at_send, distance_km, delivery_ms)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        RETURNING id, sent_at, arrives_at, vehicle_tier`,
-      [req.user.id, recipientId, content.trim(), tier, arrivesAt, expiresAt, streak.streak_days, Math.round(distKm), deliveryMs]
+      [req.user.id, recipientId, content.trim(), tier, arrivesAt, expiresAt, streak.streak_days, Math.round(distKm), Math.round(deliveryMs)]
     );
 
     // Use sender's local date so streak day boundaries respect their timezone
