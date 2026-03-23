@@ -34,13 +34,13 @@ export function onNotePosted() {
 
 // Grove investment → canopy rises (confidence)
 export function onGroveInvestment(amount) {
-  const bump = Math.max(1, Math.floor(amount * 0.02));
+  const bump = Math.max(1, Math.floor(amount * 0.05)); // 5%: 20→1pt, 100→5pt, 500→25pt
   updateMarketPrice('canopy', +bump, null).catch(() => {});
 }
 
 // Grove withdrawal → canopy dips slightly
 export function onGroveWithdrawal(amount) {
-  const drag = Math.max(1, Math.floor(amount * 0.005));
+  const drag = Math.max(1, Math.floor(amount * 0.02)); // 2%: 20→0pt, 100→2pt, 500→10pt
   updateMarketPrice('canopy', -drag, null).catch(() => {});
 }
 
