@@ -388,11 +388,10 @@ router.get('/history/:userId', requireAuth, async (req, res) => {
       if (rows.length === 0) return res.status(403).json({ error: 'Not a direct connection' });
     }
 
-    // For 1h window, trigger a fine-grained sample (5 min throttle) so the chart
-    // has enough points to show meaningful movement within the hour
-    if (win === '1h' || win === '6h') {
-      try { await maybeSampleHistory(userId, 5 * 60 * 1000); } catch (_) {}
-    }
+    // Trigger sampling based on window size to ensure enough data points
+    if (win === '1h')       { try { await maybeSampleHistory(userId, 2 * 60 * 1000); } catch (_) {} }   // 2-min throttle for 1h
+    else if (win === '6h')  { try { await maybeSampleHistory(userId, 10 * 60 * 1000); } catch (_) {} }  // 10-min throttle for 6h
+    else if (win === '12h') { try { await maybeSampleHistory(userId, 20 * 60 * 1000); } catch (_) {} }  // 20-min throttle for 12h
 
     const since = new Date(Date.now() - windowMs).toISOString();
     const { rows: points } = await pool.query(
