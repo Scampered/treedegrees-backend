@@ -102,10 +102,10 @@ router.post('/', requireAuth, async (req, res) => {
     const expiresAt  = new Date(arrivesAt.getTime() + 7 * 24 * 3600 * 1000);
 
     const { rows: [letter] } = await client.query(
-      `INSERT INTO letters (sender_id, recipient_id, content, vehicle_tier, arrives_at, expires_at, streak_at_send, distance_km)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      `INSERT INTO letters (sender_id, recipient_id, content, vehicle_tier, arrives_at, expires_at, streak_at_send, distance_km, delivery_ms)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        RETURNING id, sent_at, arrives_at, vehicle_tier`,
-      [req.user.id, recipientId, content.trim(), tier, arrivesAt, expiresAt, streak.streak_days, Math.round(distKm)]
+      [req.user.id, recipientId, content.trim(), tier, arrivesAt, expiresAt, streak.streak_days, Math.round(distKm), deliveryMs]
     );
 
     // Use sender's local date so streak day boundaries respect their timezone
@@ -310,17 +310,20 @@ router.patch('/:id/arrived', requireAuth, async (req, res) => {
     // Atomic UPDATE — marks seeds_awarded=true only once, returns nothing if already done
     const { rows: [letter] } = await pool.query(
       `UPDATE letters SET seeds_awarded = true
-       WHERE id=$1 AND recipient_id=$2 AND arrives_at <= NOW() AND seeds_awarded = false
-       RETURNING sender_id, recipient_id, COALESCE(distance_km, 0) AS distance_km`,
+       WHERE id=$1 AND recipient_id=$2 AND arrives_at <= NOW() AND (seeds_awarded = false OR seeds_awarded IS NULL)
+       RETURNING sender_id, recipient_id, COALESCE(distance_km, 0) AS distance_km, COALESCE(delivery_ms, 0) AS delivery_ms`,
       [req.params.id, req.user.id]
     );
     if (!letter) return res.status(404).json({ error: 'Already processed or not found' });
 
-    // Distance-based seed reward
-    const MAX_KM        = 20037;
-    const ratio         = Math.sqrt(Math.max(0, Math.min(letter.distance_km, MAX_KM)) / MAX_KM);
-    const seedsSender   = 5  + Math.floor(ratio * 35);
-    const seedsReceiver = 10 + Math.floor(ratio * 50);
+    // Time-based seed reward — longer delivery = more seeds
+    // Rewards patience and distance without being gameable by vehicle upgrades
+    // (faster vehicle on same route = less reward, balancing the system)
+    const MAX_MS        = 72 * 3600 * 1000; // 72h cap
+    const delivMs       = Math.max(30000, Math.min(letter.delivery_ms || 0, MAX_MS));
+    const ratio         = Math.sqrt(delivMs / MAX_MS);
+    const seedsSender   = 5  + Math.floor(ratio * 35); // 5–40
+    const seedsReceiver = 10 + Math.floor(ratio * 50); // 10–60
 
     // Award seeds
     await awardSeeds(letter.sender_id,    seedsSender,   'send_letter');
