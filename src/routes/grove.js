@@ -4,8 +4,15 @@ import pool from '../db/pool.js';
 import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
-const WITHDRAW_FEE    = 0.20; // 20% fee on the active portion only
 const MAX_MULTIPLIER  = 10;   // cap growth multiplier at 10×
+
+// Tiered fee on the active portion — smaller stakes pay less
+function withdrawFeeRate(principal) {
+  if (principal < 50)  return 0.08   //  8% for   10–49 seeds
+  if (principal < 150) return 0.12   // 12% for  50–149 seeds
+  if (principal < 300) return 0.16   // 16% for 150–299 seeds
+  return 0.20                        // 20% for  300+  seeds
+}
 
 // ── Award seeds for activity (called internally by other routes) ──────────────
 export async function awardSeeds(userId, amount, reason, client) {
@@ -294,7 +301,8 @@ router.post('/withdraw', requireAuth, async (req, res) => {
     const activeHalf  = Math.floor(principal / 2);
     const safeHalf    = principal - activeHalf;
     const activeValue = Math.floor(activeHalf * multiplier);
-    const fee         = Math.floor(activeValue * WITHDRAW_FEE);
+    const feeRate     = withdrawFeeRate(principal);
+    const fee         = Math.floor(activeValue * feeRate);
     const payout      = safeHalf + activeValue - fee;
 
     // Return payout to investor
