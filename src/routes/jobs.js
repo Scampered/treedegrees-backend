@@ -64,12 +64,14 @@ router.get('/my', requireAuth, async (req, res) => {
 // ── POST /api/jobs/register — register for a job ─────────────────────────────
 router.post('/register', requireAuth, async (req, res) => {
   const { role, bio, hourlyRate } = req.body;
-  if (!JOB_META[role]) return res.status(400).json({ error: 'Invalid role' });
+  console.log('[register] role:', role, 'hourlyRate:', hourlyRate, 'validRoles:', Object.keys(JOB_META));
+  if (!JOB_META[role]) return res.status(400).json({ error: `Invalid role: '${role}'. Valid: ${Object.keys(JOB_META).join(',')}` });
   try {
     // Check not already employed
     const { rows: [existing] } = await pool.query(
       `SELECT id FROM jobs WHERE user_id=$1`, [req.user.id]
     );
+    console.log('[register] existing job:', existing);
     if (existing) return res.status(400).json({ error: 'Already registered for a job. Unregister first.' });
 
     const rate = Math.max(JOB_META[role].baseRate, Math.floor(Number(hourlyRate) || JOB_META[role].baseRate));
