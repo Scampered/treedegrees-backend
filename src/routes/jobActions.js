@@ -248,7 +248,7 @@ router.post('/broker/open', requireAuth, async (req, res) => {
     await pool.query(`UPDATE users SET seeds=seeds-$1 WHERE id=$2`, [amt, req.user.id])
     const { rows: [session] } = await pool.query(
       `INSERT INTO broker_sessions (broker_id, client_id, escrow_seeds, duration_hours, closes_at)
-       VALUES ($1,$2,$3,$4, NOW()+($4 || ' hours')::interval) RETURNING id`,
+       VALUES ($1,$2,$3,$4, NOW() + make_interval(hours => $4)) RETURNING id`,
       [brokerId, req.user.id, amt, dur]
     )
     sendPush(brokerId, '🌱 New broker client!', `${amt} seeds for ${dur}h session.`, '/jobs').catch(() => {})
@@ -632,7 +632,7 @@ router.post('/farmer/plant', requireAuth, async (req, res) => {
     await pool.query(`UPDATE users SET seeds=seeds-$1 WHERE id=$2`, [amt, req.user.id])
     await pool.query(
       `UPDATE farmer_plots SET status='planted', seeds_deposited=$1, depositor_id=NULL,
-       planted_at=NOW(), harvest_at=NOW()+($2 || ' hours')::interval
+       planted_at=NOW(), harvest_at=NOW() + make_interval(hours => $2)
        WHERE id=$3`,
       [amt, HARVEST_HOURS, slot.id]
     )
@@ -662,7 +662,7 @@ router.post('/farmer/deposit', requireAuth, async (req, res) => {
     await pool.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [Math.floor(amt * 0.1), farmerId])
     await pool.query(
       `UPDATE farmer_plots SET status='planted', seeds_deposited=$1, depositor_id=$2,
-       fee_per_seed=$3, planted_at=NOW(), harvest_at=NOW()+($4 || ' hours')::interval
+       fee_per_seed=$3, planted_at=NOW(), harvest_at=NOW() + make_interval(hours => $4)
        WHERE id=$5`,
       [amt, req.user.id, job.hourly_rate, HARVEST_HOURS, slot.id]
     )
