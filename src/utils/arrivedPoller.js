@@ -1,9 +1,5 @@
 // src/utils/arrivedPoller.js
-// Awards seeds for arrived letters every 60s — server-side so neither
-// sender nor recipient needs the app open for seeds to land.
 import pool from '../db/pool.js';
-import { awardSeeds } from '../routes/grove.js';
-import { sendPush } from './push.js';
 
 const MAX_MS = 72 * 3600 * 1000;
 
@@ -19,15 +15,22 @@ async function processArrived() {
     );
     if (rows.length === 0) return;
 
-    console.log(`[poller] awarding seeds for ${rows.length} arrived letter(s)`);
+    console.log(`[poller] awarding seeds for ${rows.length} letter(s)`);
     for (const letter of rows) {
       const delivMs       = Math.max(30000, Math.min(letter.delivery_ms, MAX_MS));
       const ratio         = Math.sqrt(delivMs / MAX_MS);
       const seedsSender   = 5  + Math.floor(ratio * 35);
       const seedsReceiver = 10 + Math.floor(ratio * 50);
-      await awardSeeds(letter.sender_id,    seedsSender,   'send_letter');
-      await awardSeeds(letter.recipient_id, seedsReceiver, 'receive_letter');
-      sendPush(letter.recipient_id, '✉️ Letter arrived!', 'You received a letter!', '/letters').catch(() => {});
+
+      // Award directly — no import from grove.js to avoid circular deps
+      await pool.query(
+        `UPDATE users SET seeds = GREATEST(0, COALESCE(seeds,0) + $1) WHERE id = $2`,
+        [seedsSender, letter.sender_id]
+      );
+      await pool.query(
+        `UPDATE users SET seeds = GREATEST(0, COALESCE(seeds,0) + $1) WHERE id = $2`,
+        [seedsReceiver, letter.recipient_id]
+      );
     }
   } catch (e) {
     console.error('[poller] error:', e.message);
@@ -39,4 +42,4 @@ export function startArrivedPoller() {
   processArrived();
   setInterval(processArrived, 60 * 1000);
 }
-// clean 
+// fix 
