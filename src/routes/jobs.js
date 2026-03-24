@@ -187,7 +187,19 @@ router.post('/:jobId/rate', requireAuth, async (req, res) => {
   try {
     const { rows: [job] } = await pool.query(`SELECT id, user_id FROM jobs WHERE id=$1`, [req.params.jobId]);
     if (!job) return res.status(404).json({ error: 'Job not found' });
-    if (job.user_id === req.user.id) return res.status(400).json({ error: 'Cannot rate yourself' });
+    if (job.user_id === req.user.id) return res.status(400).json({ error: 'Cannot rate yourself' })
+    // Must have actually hired this worker
+    const hired = await pool.query(`
+      SELECT 1 FROM (
+        SELECT requester_id AS uid FROM courier_requests WHERE courier_id=$1
+        UNION ALL SELECT client_id FROM writer_commissions WHERE writer_id=$1
+        UNION ALL SELECT client_id FROM broker_sessions WHERE broker_id=$1
+        UNION ALL SELECT client_id FROM accountant_clients WHERE accountant_id=$1
+        UNION ALL SELECT client_id FROM steward_clients WHERE steward_id=$1
+        UNION ALL SELECT subscriber_id FROM forecaster_subscribers WHERE forecaster_id=$1
+      ) h WHERE h.uid=$2
+    `, [job.user_id, req.user.id])
+    if (!hired.rows.length) return res.status(403).json({ error: 'You must hire this person before rating' });
 
     await pool.query(
       `INSERT INTO job_ratings (job_id, rater_id, rating, review) VALUES ($1,$2,$3,$4)

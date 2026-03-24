@@ -420,32 +420,39 @@ router.post('/accountant/advice', requireAuth, async (req, res) => {
 // GET /api/job-actions/accountant/my-advice — client reads their advice
 router.get('/accountant/my-advice', requireAuth, async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      `SELECT aa.*, ac.accountant_id,
-              COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS accountant_name,
-              si.target_id, ut.seeds AS target_current_seeds, si.seeds_at_invest, si.amount
+    // Get advice records
+    const { rows: advice } = await pool.query(
+      `SELECT aa.id, aa.action, aa.amount, aa.note, aa.investment_idx, aa.created_at, aa.read_at,
+              COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS accountant_name
        FROM accountant_advice aa
        JOIN accountant_clients ac ON ac.id=aa.session_id
        JOIN users u ON u.id=ac.accountant_id
-       LEFT JOIN stock_investments si ON si.investor_id=$1 AND ROW_NUMBER() OVER() = aa.investment_idx
-       LEFT JOIN users ut ON ut.id=si.target_id
-       WHERE ac.client_id=$1 ORDER BY aa.created_at DESC LIMIT 10`,
+       WHERE ac.client_id=$1 ORDER BY aa.created_at DESC LIMIT 20`,
       [req.user.id]
     )
+    // Get client's own investments with names (for them to cross-reference advice)
+    const { rows: investments } = await pool.query(
+      `SELECT si.id, si.amount, si.seeds_at_invest, si.invested_at,
+              u.seeds AS current_seeds,
+              COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS name,
+              (ROW_NUMBER() OVER(ORDER BY si.invested_at))::int - 1 AS idx
+       FROM stock_investments si JOIN users u ON u.id=si.target_id
+       WHERE si.investor_id=$1 ORDER BY si.invested_at`, [req.user.id]
+    )
+    // Market positions
+    const { rows: markets } = await pool.query(
+      `SELECT mi.market, mi.amount, mi.price_at_invest, ms.price AS current_price, mi.invested_at
+       FROM market_investments mi JOIN market_state ms ON ms.market=mi.market
+       WHERE mi.investor_id=$1`, [req.user.id]
+    )
+    // Mark as read
     await pool.query(
       `UPDATE accountant_advice SET read_at=NOW() WHERE session_id IN
        (SELECT id FROM accountant_clients WHERE client_id=$1) AND read_at IS NULL`,
       [req.user.id]
     )
-    // Get investments with actual names for the client
-    const { rows: investments } = await pool.query(
-      `SELECT si.id, si.amount, si.seeds_at_invest, u.seeds AS current_seeds,
-              COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS name,
-              ROW_NUMBER() OVER(ORDER BY si.invested_at) AS idx
-       FROM stock_investments si JOIN users u ON u.id=si.target_id WHERE si.investor_id=$1`, [req.user.id]
-    )
-    res.json({ advice: rows, investments })
-  } catch (e) { res.status(500).json({ error: 'Server error' }) }
+    res.json({ advice, investments, markets })
+  } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
 })
 
 // ── STEWARD ───────────────────────────────────────────────────────────────────

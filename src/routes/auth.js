@@ -7,7 +7,7 @@ import {
   generateFriendCode, isValidEmail, isStrongPassword,
 } from '../utils/auth.js';
 import { containsProfanity, profanityError } from '../utils/profanity.js';
-import { sendVerificationEmail } from '../utils/email.js';
+import { sendVerificationEmail, sendPasswordResetEmail } from '../utils/email.js';
 import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
@@ -265,6 +265,55 @@ router.delete('/account', requireAuth, async (req, res) => {
     console.error('Delete account error:', err.message);
     res.status(500).json({ error: 'Server error' });
   }
+});
+
+
+// ── POST /api/auth/forgot-password ───────────────────────────────────────────
+router.post('/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email required' });
+  try {
+    const { rows: [user] } = await pool.query(
+      'SELECT id, nickname, email FROM users WHERE email=$1 AND deleted_at IS NULL',
+      [email.toLowerCase().trim()]
+    );
+    // Always respond OK — don't reveal whether email exists
+    if (!user) return res.json({ ok: true });
+
+    const token   = crypto.randomBytes(32).toString('hex');
+    const expires = new Date(Date.now() + 3600000); // 1 hour
+    await pool.query(
+      `UPDATE users SET reset_token=$1, reset_token_expires=$2 WHERE id=$3`,
+      [token, expires, user.id]
+    );
+    sendPasswordResetEmail(user.email, user.nickname, token).catch(() => {});
+    res.json({ ok: true });
+  } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }); }
+});
+
+// ── POST /api/auth/reset-password ────────────────────────────────────────────
+router.post('/reset-password', async (req, res) => {
+  const { token, email, newPassword } = req.body;
+  if (!token || !email || !newPassword)
+    return res.status(400).json({ error: 'Token, email and new password required' });
+  if (newPassword.length < 8)
+    return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  try {
+    const { rows: [user] } = await pool.query(
+      `SELECT id FROM users WHERE email=$1 AND reset_token=$2
+       AND reset_token_expires > NOW() AND deleted_at IS NULL`,
+      [email.toLowerCase().trim(), token]
+    );
+    if (!user) return res.status(400).json({ error: 'Invalid or expired reset link' });
+
+    const bcrypt  = await import('bcrypt');
+    const hashed  = await bcrypt.default.hash(newPassword, 10);
+    await pool.query(
+      `UPDATE users SET password_hash=$1, reset_token=NULL, reset_token_expires=NULL WHERE id=$2`,
+      [hashed, user.id]
+    );
+    res.json({ ok: true });
+  } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }); }
 });
 
 export default router;

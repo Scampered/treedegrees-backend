@@ -1,38 +1,28 @@
 // src/utils/email.js
-// Sends emails via Brevo HTTP API (no SMTP - works on all hosting platforms)
-// Set BREVO_API_KEY in your environment variables.
+// Sends emails via Gmail SMTP using nodemailer.
+// Set GMAIL_USER and GMAIL_APP_PASSWORD in your Render environment variables.
 
-async function sendMail({ from, fromName, to, subject, html, text }) {
-  if (!process.env.BREVO_API_KEY) {
-    console.warn('⚠️ BREVO_API_KEY not set');
-    return false;
+import nodemailer from 'nodemailer';
+
+let transporter = null;
+
+function getTransporter() {
+  if (transporter) return transporter;
+  if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
+    console.warn('⚠️  GMAIL_USER or GMAIL_APP_PASSWORD not set — emails disabled');
+    return null;
   }
-
-  const res = await fetch('https://api.brevo.com/v3/smtp/email', {
-    method: 'POST',
-    headers: {
-      'api-key': process.env.BREVO_API_KEY,
-      'Content-Type': 'application/json',
+  transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.GMAIL_USER,
+      pass: process.env.GMAIL_APP_PASSWORD.replace(/\s/g, ''), // strip any spaces
     },
-    body: JSON.stringify({
-      sender: { name: fromName, email: from },
-      to: [{ email: to }],
-      subject,
-      htmlContent: html,
-      textContent: text,
-    }),
   });
-
-  if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.message || `Brevo API error: ${res.status}`);
-  }
-
-  return res.json();
+  return transporter;
 }
 
-// ── Email templates ────────────────────────────────────────────────────────
-
+// ── Email templates ────────────────────────────────────────────────────────────
 function verificationTemplate(nickname, verifyUrl) {
   return {
     subject: '🌳 Verify your TreeDegrees email',
@@ -44,10 +34,12 @@ function verificationTemplate(nickname, verifyUrl) {
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#082208;padding:40px 20px;">
     <tr><td align="center">
       <table width="480" cellpadding="0" cellspacing="0" style="background:#0d2b0d;border-radius:16px;border:1px solid #196219;overflow:hidden;max-width:100%;">
+        <!-- Header -->
         <tr><td style="background:#113f11;padding:24px 32px;text-align:center;">
           <p style="margin:0;font-size:28px;">🌳</p>
           <h1 style="margin:8px 0 0;color:#80d580;font-size:22px;font-weight:700;">TreeDegrees</h1>
         </td></tr>
+        <!-- Body -->
         <tr><td style="padding:32px;">
           <p style="color:#c0e0c0;font-size:16px;margin:0 0 8px;">Hi ${nickname || 'there'},</p>
           <p style="color:#80a080;font-size:14px;margin:0 0 24px;line-height:1.6;">
@@ -63,6 +55,7 @@ function verificationTemplate(nickname, verifyUrl) {
             This link expires in 24 hours. If you didn't sign up, you can ignore this email.
           </p>
         </td></tr>
+        <!-- Footer -->
         <tr><td style="background:#082208;padding:16px 32px;text-align:center;border-top:1px solid #196219;">
           <p style="color:#2d5a2d;font-size:11px;margin:0;">🌳 TreeDegrees · Your social graph, your way</p>
         </td></tr>
@@ -72,49 +65,6 @@ function verificationTemplate(nickname, verifyUrl) {
 </body>
 </html>`,
     text: `Hi ${nickname || 'there'},\n\nVerify your TreeDegrees email by clicking: ${verifyUrl}\n\nThis link expires in 24 hours.\n\nTreeDegrees`,
-  };
-}
-
-function emailChangeTemplate(nickname, verifyUrl, newEmail) {
-  return {
-    subject: '🌳 Confirm your new TreeDegrees email',
-    html: `
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"></head>
-<body style="margin:0;padding:0;background:#082208;font-family:'Segoe UI',Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#082208;padding:40px 20px;">
-    <tr><td align="center">
-      <table width="480" cellpadding="0" cellspacing="0" style="background:#0d2b0d;border-radius:16px;border:1px solid #196219;overflow:hidden;max-width:100%;">
-        <tr><td style="background:#113f11;padding:24px 32px;text-align:center;">
-          <p style="margin:0;font-size:28px;">🌳</p>
-          <h1 style="margin:8px 0 0;color:#80d580;font-size:22px;font-weight:700;">TreeDegrees</h1>
-        </td></tr>
-        <tr><td style="padding:32px;">
-          <p style="color:#c0e0c0;font-size:16px;margin:0 0 8px;">Hi ${nickname || 'there'},</p>
-          <p style="color:#80a080;font-size:14px;margin:0 0 24px;line-height:1.6;">
-            You requested to change your email to <strong style="color:#c0e0c0;">${newEmail}</strong>.<br/>
-            Click the button below to confirm this change.
-          </p>
-          <div style="text-align:center;margin:32px 0;">
-            <a href="${verifyUrl}"
-               style="background:#1f7e1f;color:#e0ffe0;text-decoration:none;padding:14px 32px;border-radius:50px;font-size:15px;font-weight:600;display:inline-block;">
-              ✅ Confirm new email
-            </a>
-          </div>
-          <p style="color:#4d7a4d;font-size:12px;text-align:center;margin:0;">
-            This link expires in 24 hours. If you didn't request this, you can ignore this email.
-          </p>
-        </td></tr>
-        <tr><td style="background:#082208;padding:16px 32px;text-align:center;border-top:1px solid #196219;">
-          <p style="color:#2d5a2d;font-size:11px;margin:0;">🌳 TreeDegrees · Your social graph, your way</p>
-        </td></tr>
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>`,
-    text: `Hi ${nickname || 'there'},\n\nConfirm your new email (${newEmail}) by clicking: ${verifyUrl}\n\nThis link expires in 24 hours.\n\nTreeDegrees`,
   };
 }
 
@@ -156,25 +106,25 @@ function letterArrivedTemplate(nickname, senderName, vehicleEmoji) {
   };
 }
 
-// ── Public send functions ──────────────────────────────────────────────────
+// ── Public send functions ─────────────────────────────────────────────────────
 
 export async function sendVerificationEmail(toEmail, nickname, token) {
-  console.log("📧 Sending verification email via Brevo API...");
+  const t = getTransporter();
+  if (!t) return false;
 
   const baseUrl = process.env.FRONTEND_URL || 'https://treedegrees.vercel.app';
   const verifyUrl = `${baseUrl}/verify?token=${token}&email=${encodeURIComponent(toEmail)}`;
   const tmpl = verificationTemplate(nickname, verifyUrl);
 
   try {
-    await sendMail({
-      from: 'tree3degrees@gmail.com',
-      fromName: 'TreeDegrees 🌳',
+    await t.sendMail({
+      from: `"TreeDegrees 🌳" <${process.env.GMAIL_USER}>`,
       to: toEmail,
       subject: tmpl.subject,
       html: tmpl.html,
       text: tmpl.text,
     });
-    console.log(`✅ Verification email sent to ${toEmail}`);
+    console.log(`✉️  Verification email sent to ${toEmail}`);
     return true;
   } catch (err) {
     console.error('Email send error:', err.message);
@@ -183,11 +133,12 @@ export async function sendVerificationEmail(toEmail, nickname, token) {
 }
 
 export async function sendLetterArrivedEmail(toEmail, nickname, senderName, vehicleEmoji) {
+  const t = getTransporter();
+  if (!t) return false;
   const tmpl = letterArrivedTemplate(nickname, senderName, vehicleEmoji);
   try {
-    await sendMail({
-      from: 'tree3degrees@gmail.com',
-      fromName: 'TreeDegrees 🌳',
+    await t.sendMail({
+      from: `"TreeDegrees 🌳" <${process.env.GMAIL_USER}>`,
       to: toEmail,
       subject: tmpl.subject,
       html: tmpl.html,
@@ -200,26 +151,48 @@ export async function sendLetterArrivedEmail(toEmail, nickname, senderName, vehi
   }
 }
 
-export async function sendEmailChangeEmail(toEmail, nickname, token, newEmail) {
-  console.log("📧 Sending email change confirmation via Brevo API...");
+function resetPasswordTemplate(nickname, resetUrl) {
+  return {
+    subject: '🔑 Reset your TreeDegrees password',
+    html: `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+      body{font-family:system-ui,sans-serif;background:#0a0f0a;color:#c8d8c8;margin:0;padding:20px}
+      .card{max-width:480px;margin:0 auto;background:#111811;border:1px solid #1a3a1a;border-radius:16px;overflow:hidden}
+      .header{background:#0d2b0d;padding:28px 32px;text-align:center}
+      .logo{font-size:32px;margin-bottom:8px}
+      .title{color:#4ade80;font-size:22px;font-weight:700;margin:0}
+      .body{padding:28px 32px}
+      .btn{display:inline-block;background:#16a34a;color:white;text-decoration:none;padding:14px 32px;border-radius:10px;font-weight:600;font-size:15px;margin:20px 0}
+      .footer{padding:16px 32px;text-align:center;color:#3a5a3a;font-size:12px}
+    </style></head><body><div class="card">
+      <div class="header"><div class="logo">🌳</div><p class="title">TreeDegrees</p></div>
+      <div class="body">
+        <p>Hi ${nickname || 'there'},</p>
+        <p>We received a request to reset your password. Click below to set a new one:</p>
+        <div style="text-align:center"><a href="${resetUrl}" class="btn">Reset Password</a></div>
+        <p style="color:#3a5a3a;font-size:13px">This link expires in 1 hour. If you didn't request this, ignore this email — your password won't change.</p>
+      </div>
+      <div class="footer">TreeDegrees · Your social graph</div>
+    </div></body></html>`,
+  }
+}
 
+export async function sendPasswordResetEmail(toEmail, nickname, token) {
+  const t = getTransporter();
+  if (!t) return false;
   const baseUrl = process.env.FRONTEND_URL || 'https://treedegrees.vercel.app';
-  const verifyUrl = `${baseUrl}/verify-email-change?token=${token}&email=${encodeURIComponent(toEmail)}`;
-  const tmpl = emailChangeTemplate(nickname, verifyUrl, newEmail);
-
+  const resetUrl = `${baseUrl}/reset-password?token=${encodeURIComponent(token)}&email=${encodeURIComponent(toEmail)}`;
+  const tmpl = resetPasswordTemplate(nickname, resetUrl);
   try {
-    await sendMail({
-      from: 'tree3degrees@gmail.com',
-      fromName: 'TreeDegrees 🌳',
+    await t.sendMail({
+      from: `"TreeDegrees 🌳" <${process.env.GMAIL_USER}>`,
       to: toEmail,
       subject: tmpl.subject,
       html: tmpl.html,
-      text: tmpl.text,
     });
-    console.log(`✅ Email change confirmation sent to ${toEmail}`);
+    console.log(`🔑 Password reset email sent to ${toEmail}`);
     return true;
   } catch (err) {
-    console.error('Email change send error:', err.message);
+    console.error('Reset email error:', err.message);
     return false;
   }
 }
