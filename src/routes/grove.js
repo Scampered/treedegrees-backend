@@ -83,6 +83,17 @@ router.get('/me', requireAuth, async (req, res) => {
   } catch (err) { console.error(err.message); res.status(500).json({ error: 'Server error' }); }
 });
 
+
+// ── GET /api/grove/seeds — lightweight balance check (single query) ───────────
+router.get('/seeds', requireAuth, async (req, res) => {
+  try {
+    const { rows: [u] } = await pool.query(
+      `SELECT seeds FROM users WHERE id=$1`, [req.user.id]
+    );
+    res.json({ seeds: u?.seeds ?? 0 });
+  } catch (err) { res.status(500).json({ error: 'Server error' }); }
+});
+
 // ── GET /api/grove/connections ────────────────────────────────────────────────
 router.get('/connections', requireAuth, async (req, res) => {
   try {
