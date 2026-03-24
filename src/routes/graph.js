@@ -221,11 +221,11 @@ router.get('/map', requireAuth, async (req, res) => {
       const canSeeNote = !isMe && myFriendIds.has(u.id) && noteIsFresh;
 
       // Mood — ONLY direct friends (or self), fresh within 24h
-      const moodAge = u.daily_mood_updated_at
-        ? (Date.now() - new Date(u.daily_mood_updated_at).getTime())
+      const moodAge = u.daily_mood, j.role AS job_role_updated_at
+        ? (Date.now() - new Date(u.daily_mood, j.role AS job_role_updated_at).getTime())
         : Infinity;
       const moodIsFresh = moodAge < 86400000;
-      const canSeeMood = (isMe || myFriendIds.has(u.id)) && moodIsFresh && !!u.daily_mood;
+      const canSeeMood = (isMe || myFriendIds.has(u.id)) && moodIsFresh && !!u.daily_mood, j.role AS job_role;
 
       // City — hide exact city when location is private/hidden (show country only)
       const locationIsApprox = isApproximate || effectivelyHidden;
@@ -247,7 +247,7 @@ router.get('/map', requireAuth, async (req, res) => {
         isPublic: u.is_public,
         dailyNote: canSeeNote ? u.daily_note : null,
         hasNote: !isMe && myFriendIds.has(u.id) && !!u.daily_note && noteIsFresh,
-        mood: canSeeMood ? u.daily_mood : null,
+        mood: canSeeMood ? u.daily_mood, j.role AS job_role : null,
         seeds: (isMe || myFriendIds.has(u.id)) ? (u.seeds || 0) : null,
       };
     });
