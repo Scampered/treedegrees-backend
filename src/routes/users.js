@@ -40,6 +40,25 @@ router.patch('/profile', requireAuth, async (req, res) => {
     if (bio && containsProfanity(bio))
       return res.status(400).json({ error: profanityError('Bio') });
 
+    // Location cooldown: 7 days between city/country changes
+    const changingLocation = city !== undefined || country !== undefined;
+    if (changingLocation) {
+      const { rows: [cur] } = await pool.query(
+        `SELECT city, country, location_changed_at FROM users WHERE id=$1`, [req.user.id]
+      );
+      const sameCity    = !city    || city    === cur?.city;
+      const sameCountry = !country || country === cur?.country;
+      if (!sameCity || !sameCountry) {
+        if (cur?.location_changed_at) {
+          const daysSince = (Date.now() - new Date(cur.location_changed_at)) / 86400000;
+          if (daysSince < 7) {
+            const daysLeft = Math.ceil(7 - daysSince);
+            return res.status(429).json({ error: `Location can only be changed every 7 days. ${daysLeft} day(s) remaining.` });
+          }
+        }
+      }
+    }
+
     const validPrivacy = ['exact', 'private', 'hidden'];
     const privacyValue = validPrivacy.includes(locationPrivacy) ? locationPrivacy : null;
 
@@ -54,10 +73,13 @@ router.patch('/profile', requireAuth, async (req, res) => {
         longitude = COALESCE($6, longitude),
         is_public = COALESCE($7, is_public),
         connections_public = COALESCE($8, connections_public),
-        location_privacy = COALESCE($9, location_privacy)
+        location_privacy = COALESCE($9, location_privacy),
+        location_changed_at = CASE
+          WHEN $3 IS NOT NULL OR $4 IS NOT NULL THEN NOW()
+          ELSE location_changed_at END
        WHERE id = $10 AND deleted_at IS NULL
        RETURNING id, full_name, nickname, bio, city, country, latitude, longitude,
-                 is_public, connections_public, location_privacy`,
+                 is_public, connections_public, location_privacy, location_changed_at`,
       [bio, nickname || null, city, country, latitude, longitude, isPublic, connectionsPublic, privacyValue, req.user.id, fullName || null]
     );
 

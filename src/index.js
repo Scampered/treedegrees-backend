@@ -17,6 +17,7 @@ import gamesRoutes from './routes/games.js';
 import groveRoutes from './routes/grove.js';
 import marketRoutes from './routes/market.js';
 import pushRoutes from './routes/push.js';
+import jobsRoutes from './routes/jobs.js';
 import { startArrivedPoller } from './utils/arrivedPoller.js';
 import { requireAuth } from './middleware/auth.js';
 import pool from './db/pool.js';
@@ -146,6 +147,7 @@ app.use('/api/groups',    apiLimiter,  groupsRoutes);
 app.use('/api/games',     apiLimiter,  gamesRoutes);
 app.use('/api/market',    apiLimiter,  marketRoutes);
 app.use('/api/push',      apiLimiter,  pushRoutes);
+app.use('/api/jobs',      apiLimiter,  jobsRoutes);
 app.use('/api/grove',     apiLimiter,  groveRoutes);
 
 // ── 404 ───────────────────────────────────────────────────────────────────────
