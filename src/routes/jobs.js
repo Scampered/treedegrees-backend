@@ -27,8 +27,8 @@ router.get('/listings', requireAuth, async (req, res) => {
               EXISTS(
                 SELECT 1 FROM friendships f
                 WHERE f.status='accepted'
-                  AND ((f.user_id=$1 AND f.friend_id=j.user_id)
-                    OR (f.friend_id=$1 AND f.user_id=j.user_id))
+                  AND ((f.user_id_1=$1 AND f.user_id_2=j.user_id)
+                    OR (f.user_id_2=$1 AND f.user_id_1=j.user_id))
               ) AS is_connection
        FROM jobs j JOIN users u ON u.id = j.user_id
        WHERE j.active = true

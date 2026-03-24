@@ -90,11 +90,12 @@ router.get('/map', requireAuth, async (req, res) => {
 
     // 6. Fetch user data for all relevant nodes
     const { rows: users } = await pool.query(
-      `SELECT id, full_name, nickname, city, country, latitude, longitude,
-              is_public, location_privacy, daily_note, daily_mood, daily_mood_updated_at,
-              COALESCE(seeds, 0) AS seeds
-       FROM users
-       WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL AND latitude IS NOT NULL`,
+      `SELECT u.id, u.full_name, u.nickname, u.city, u.country, u.latitude, u.longitude,
+              u.is_public, u.location_privacy, u.daily_note, u.daily_mood, u.daily_mood_updated_at,
+              COALESCE(u.seeds, 0) AS seeds, j.role AS job_role
+       FROM users u
+       LEFT JOIN jobs j ON j.user_id = u.id AND j.active = true
+       WHERE u.id = ANY($1::uuid[]) AND u.deleted_at IS NULL AND u.latitude IS NOT NULL`,
       [relevantIds]
     );
     const userById = Object.fromEntries(users.map(u => [u.id, u]));
@@ -221,11 +222,11 @@ router.get('/map', requireAuth, async (req, res) => {
       const canSeeNote = !isMe && myFriendIds.has(u.id) && noteIsFresh;
 
       // Mood — ONLY direct friends (or self), fresh within 24h
-      const moodAge = u.daily_mood, j.role AS job_role_updated_at
-        ? (Date.now() - new Date(u.daily_mood, j.role AS job_role_updated_at).getTime())
+      const moodAge = u.daily_mood_updated_at
+        ? (Date.now() - new Date(u.daily_mood_updated_at).getTime())
         : Infinity;
       const moodIsFresh = moodAge < 86400000;
-      const canSeeMood = (isMe || myFriendIds.has(u.id)) && moodIsFresh && !!u.daily_mood, j.role AS job_role;
+      const canSeeMood = (isMe || myFriendIds.has(u.id)) && moodIsFresh && !!u.daily_mood;
 
       // City — hide exact city when location is private/hidden (show country only)
       const locationIsApprox = isApproximate || effectivelyHidden;
@@ -247,7 +248,8 @@ router.get('/map', requireAuth, async (req, res) => {
         isPublic: u.is_public,
         dailyNote: canSeeNote ? u.daily_note : null,
         hasNote: !isMe && myFriendIds.has(u.id) && !!u.daily_note && noteIsFresh,
-        mood: canSeeMood ? u.daily_mood, j.role AS job_role : null,
+        mood: canSeeMood ? u.daily_mood : null,
+        jobRole: u.job_role || null,
         seeds: (isMe || myFriendIds.has(u.id)) ? (u.seeds || 0) : null,
       };
     });
