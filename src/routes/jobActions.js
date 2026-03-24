@@ -32,7 +32,8 @@ router.get('/courier/queue', requireAuth, async (req, res) => {
     const { rows } = await pool.query(
       `SELECT cr.id, cr.from_country, cr.to_country, cr.est_hours, cr.fee_seeds,
               cr.status, cr.created_at,
-              COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS sender_name
+              COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS sender_name,
+              u.city AS sender_city, u.country AS sender_country
        FROM courier_requests cr
        JOIN users u ON u.id = cr.requester_id
        WHERE cr.courier_id = $1 AND cr.status = 'pending'
@@ -53,9 +54,9 @@ router.post('/courier/request', requireAuth, async (req, res) => {
   const { courierId } = req.body
   try {
     // Get requester's country
-    const { rows: [me] } = await pool.query(`SELECT country FROM users WHERE id=$1`, [req.user.id])
+    const { rows: [me] } = await pool.query(`SELECT country, city FROM users WHERE id=$1`, [req.user.id])
     const { rows: [courier] } = await pool.query(
-      `SELECT u.country, j.hourly_rate FROM users u JOIN jobs j ON j.user_id=u.id
+      `SELECT u.country, u.city, j.hourly_rate FROM users u JOIN jobs j ON j.user_id=u.id
        WHERE u.id=$1 AND j.role='courier' AND j.active=true`, [courierId]
     )
     if (!courier) return res.status(404).json({ error: 'Courier not found' })
@@ -66,10 +67,12 @@ router.post('/courier/request', requireAuth, async (req, res) => {
     const speed = COURIER_TIERS[tier].speedMult
     const estHours = Math.max(0.5, 12 / speed)
 
+    const fromLabel = [me.city, me.country].filter(Boolean).join(', ') || 'Unknown'
+    const toLabel   = [courier.city, courier.country].filter(Boolean).join(', ') || 'Unknown'
     const { rows: [req2] } = await pool.query(
       `INSERT INTO courier_requests (requester_id, courier_id, from_country, to_country, est_hours, fee_seeds)
        VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-      [req.user.id, courierId, me.country || 'Unknown', courier.country || 'Unknown', estHours, courier.hourly_rate]
+      [req.user.id, courierId, fromLabel, toLabel, estHours, courier.hourly_rate]
     )
 
     // Notify courier
@@ -340,18 +343,24 @@ router.get('/accountant/clients', requireAuth, async (req, res) => {
     const result = []
     for (const c of clients) {
       const { rows: investments } = await pool.query(
-        `SELECT si.id, si.amount, si.seeds_at_invest,
+        `SELECT si.id, si.amount, si.seeds_at_invest, si.invested_at,
                 u.seeds AS current_seeds,
                 ROW_NUMBER() OVER (ORDER BY si.invested_at) AS idx
          FROM stock_investments si JOIN users u ON u.id=si.target_id
          WHERE si.investor_id=$1`, [c.client_id]
+      )
+      // Also fetch market positions
+      const { rows: marketPositions } = await pool.query(
+        `SELECT mi.market, mi.amount, mi.price_at_invest, mi.invested_at, ms.price AS current_price
+         FROM market_investments mi JOIN market_state ms ON ms.market=mi.market
+         WHERE mi.investor_id=$1`, [c.client_id]
       )
       // Get any pending advice for this client
       const { rows: advice } = await pool.query(
         `SELECT * FROM accountant_advice WHERE session_id=$1 AND read_at IS NULL ORDER BY created_at DESC LIMIT 5`,
         [c.session_id]
       )
-      result.push({ ...c, investments, pendingAdvice: advice })
+      result.push({ ...c, investments, marketPositions, pendingAdvice: advice })
     }
     res.json({ clients: result })
   } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
@@ -384,6 +393,14 @@ router.post('/accountant/advice', requireAuth, async (req, res) => {
       [sessionId, req.user.id]
     )
     if (!session) return res.status(403).json({ error: 'Not your client' })
+    // Cooldown: 1 advice per 24h per client
+    if (session.last_report_at) {
+      const hoursSince = (Date.now() - new Date(session.last_report_at)) / 3600000
+      if (hoursSince < 24) {
+        const hoursLeft = Math.ceil(24 - hoursSince)
+        return res.status(429).json({ error: `Already sent advice today. Try again in ${hoursLeft}h.` })
+      }
+    }
     // Charge fee
     const { rows: [client] } = await pool.query(`SELECT seeds FROM users WHERE id=$1`, [session.client_id])
     if ((client?.seeds || 0) < session.fee_seeds) return res.status(400).json({ error: 'Client has insufficient seeds for fee' })
@@ -624,6 +641,15 @@ router.post('/farmer/plant', requireAuth, async (req, res) => {
       `SELECT * FROM farmer_plots WHERE farmer_id=$1 AND slot_index=$2`, [req.user.id, slotIndex]
     )
     if (!slot) return res.status(404).json({ error: 'Slot not found' })
+    if (slot.status === 'deposited') {
+      // Plant a client's deposit — no seed cost to farmer
+      await pool.query(
+        `UPDATE farmer_plots SET status='planted', harvest_at=NOW() + make_interval(hours => $1) WHERE id=$2`,
+        [HARVEST_HOURS, slot.id]
+      )
+      res.json({ ok: true, harvestAt: new Date(Date.now() + HARVEST_HOURS * 3600000), fromDeposit: true })
+      return
+    }
     if (slot.status !== 'empty') return res.status(400).json({ error: 'Slot already occupied' })
     // Deduct farmer's own seeds
     const { rows: [me] } = await pool.query(`SELECT seeds FROM users WHERE id=$1`, [req.user.id])
@@ -640,35 +666,48 @@ router.post('/farmer/plant', requireAuth, async (req, res) => {
   } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
 })
 
-// POST /api/job-actions/farmer/deposit — client deposits seeds into a farmer's slot
+// POST /api/job-actions/farmer/deposit — client deposits seeds (farmer has 1h to plant)
 router.post('/farmer/deposit', requireAuth, async (req, res) => {
-  const { farmerId, slotIndex, seeds } = req.body
+  const { farmerId, seeds } = req.body
   const amt = Math.max(1, Math.floor(Number(seeds) || 0))
   try {
     const { rows: [job] } = await pool.query(
       `SELECT j.hourly_rate FROM jobs j WHERE j.user_id=$1 AND j.role='farmer' AND j.active=true`, [farmerId]
     )
     if (!job) return res.status(404).json({ error: 'Farmer not found' })
+    // Find any empty slot
     const { rows: [slot] } = await pool.query(
-      `SELECT * FROM farmer_plots WHERE farmer_id=$1 AND slot_index=$2 AND status='empty'`,
-      [farmerId, slotIndex]
+      `SELECT * FROM farmer_plots WHERE farmer_id=$1 AND status='empty' LIMIT 1`, [farmerId]
     )
-    if (!slot) return res.status(400).json({ error: 'Slot unavailable' })
+    if (!slot) return res.status(400).json({ error: 'No empty slots available' })
     const { rows: [me] } = await pool.query(`SELECT seeds FROM users WHERE id=$1`, [req.user.id])
-    const totalCost = amt + Math.floor(amt * 0.1) // 10% planting fee to farmer
-    if ((me?.seeds || 0) < totalCost) return res.status(400).json({ error: 'Not enough seeds' })
+    if ((me?.seeds || 0) < amt) return res.status(400).json({ error: 'Not enough seeds' })
 
-    await pool.query(`UPDATE users SET seeds=seeds-$1 WHERE id=$2`, [totalCost, req.user.id])
-    await pool.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [Math.floor(amt * 0.1), farmerId])
+    // Take seeds from client — hold in escrow (depositor_id set, seeds_deposited set, status = 'deposited')
+    await pool.query(`UPDATE users SET seeds=seeds-$1 WHERE id=$2`, [amt, req.user.id])
     await pool.query(
-      `UPDATE farmer_plots SET status='planted', seeds_deposited=$1, depositor_id=$2,
-       fee_per_seed=$3, planted_at=NOW(), harvest_at=NOW() + make_interval(hours => $4)
-       WHERE id=$5`,
-      [amt, req.user.id, job.hourly_rate, HARVEST_HOURS, slot.id]
+      `UPDATE farmer_plots SET status='deposited', seeds_deposited=$1, depositor_id=$2,
+       fee_per_seed=$3, planted_at=NOW()
+       WHERE id=$4`,
+      [amt, req.user.id, job.hourly_rate, slot.id]
     )
-    sendPush(farmerId, '🌾 New deposit!', `${amt} seeds deposited in slot ${slotIndex + 1}.`, '/jobs').catch(() => {})
-    res.json({ ok: true })
+    sendPush(farmerId, '🌾 New deposit!', `${amt} seeds waiting to be planted! Plant within 1 hour.`, '/jobs').catch(() => {})
+    res.json({ ok: true, slotIndex: slot.slot_index })
   } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
+})
+
+// GET /api/job-actions/farmer/my-deposits — client checks their deposits
+router.get('/farmer/my-deposits', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT fp.id, fp.slot_index, fp.seeds_deposited, fp.status, fp.planted_at, fp.harvest_at, fp.harvest_result,
+              COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS farmer_name
+       FROM farmer_plots fp JOIN users u ON u.id=fp.farmer_id
+       WHERE fp.depositor_id=$1 ORDER BY fp.planted_at DESC`,
+      [req.user.id]
+    )
+    res.json({ deposits: rows })
+  } catch (e) { res.status(500).json({ error: 'Server error' }) }
 })
 
 // POST /api/job-actions/farmer/harvest — harvest a ready slot

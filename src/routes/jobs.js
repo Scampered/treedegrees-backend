@@ -23,13 +23,25 @@ router.get('/listings', requireAuth, async (req, res) => {
               j.rating_sum, j.rating_count, j.registered_at,
               COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS name,
               u.city, u.country,
-              -- Check if requester is a connection (1st degree)
               EXISTS(
                 SELECT 1 FROM friendships f
                 WHERE f.status='accepted'
                   AND ((f.user_id_1=$1 AND f.user_id_2=j.user_id)
                     OR (f.user_id_2=$1 AND f.user_id_1=j.user_id))
-              ) AS is_connection
+              ) AS is_connection,
+              -- Has the viewer hired this worker?
+              (
+                EXISTS(SELECT 1 FROM courier_requests    WHERE courier_id=j.user_id   AND requester_id=$1) OR
+                EXISTS(SELECT 1 FROM writer_commissions  WHERE writer_id=j.user_id    AND client_id=$1) OR
+                EXISTS(SELECT 1 FROM broker_sessions     WHERE broker_id=j.user_id    AND client_id=$1) OR
+                EXISTS(SELECT 1 FROM accountant_clients  WHERE accountant_id=j.user_id AND client_id=$1) OR
+                EXISTS(SELECT 1 FROM steward_clients     WHERE steward_id=j.user_id   AND client_id=$1) OR
+                EXISTS(SELECT 1 FROM forecaster_subscribers WHERE forecaster_id=j.user_id AND subscriber_id=$1)
+              ) AS has_hired,
+              -- Has the viewer already rated?
+              EXISTS(
+                SELECT 1 FROM job_ratings WHERE job_id=j.id AND rater_id=$1
+              ) AS has_rated
        FROM jobs j JOIN users u ON u.id = j.user_id
        WHERE j.active = true
        ORDER BY
@@ -75,13 +87,15 @@ router.post('/register', requireAuth, async (req, res) => {
     if (existing) return res.status(400).json({ error: 'Already registered for a job. Unregister first.' });
 
     const rate = Math.max(JOB_META[role].baseRate, Math.floor(Number(hourlyRate) || JOB_META[role].baseRate));
+    console.log('[register] inserting...', req.user.id, role, rate);
     const { rows: [job] } = await pool.query(
       `INSERT INTO jobs (user_id, role, hourly_rate, bio)
        VALUES ($1,$2,$3,$4) RETURNING *`,
       [req.user.id, role, rate, (bio || '').slice(0, 200)]
     );
+    console.log('[register] inserted job:', job?.id);
     res.json({ ok: true, job: { ...job, meta: JOB_META[role] } });
-  } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }); }
+  } catch (e) { console.error('[register] DB error:', e.message); res.status(500).json({ error: 'Server error' }); }
 });
 
 // ── PATCH /api/jobs/my — update bio/rate ─────────────────────────────────────
@@ -98,10 +112,71 @@ router.patch('/my', requireAuth, async (req, res) => {
 
 // ── DELETE /api/jobs/my — unregister ─────────────────────────────────────────
 router.delete('/my', requireAuth, async (req, res) => {
+  const client = await pool.connect();
   try {
-    await pool.query(`DELETE FROM jobs WHERE user_id=$1`, [req.user.id]);
+    await client.query('BEGIN');
+    // Get current job role
+    const { rows: [job] } = await client.query(`SELECT role FROM jobs WHERE user_id=$1`, [req.user.id]);
+    if (!job) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'No job found' }); }
+
+    // Refund pending courier requests (seeds already taken)
+    if (job.role === 'courier') {
+      const { rows: pending } = await client.query(
+        `SELECT requester_id, fee_seeds FROM courier_requests WHERE courier_id=$1 AND status='accepted'`, [req.user.id]
+      );
+      for (const r of pending) {
+        await client.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [r.fee_seeds, r.requester_id]);
+      }
+      await client.query(`UPDATE courier_requests SET status='declined' WHERE courier_id=$1 AND status IN ('pending','accepted')`, [req.user.id]);
+    }
+    // Refund pending writer commissions
+    if (job.role === 'writer') {
+      const { rows: pending } = await client.query(
+        `SELECT client_id, fee_seeds FROM writer_commissions WHERE writer_id=$1 AND status='pending'`, [req.user.id]
+      );
+      for (const r of pending) {
+        await client.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [r.fee_seeds, r.client_id]);
+      }
+      await client.query(`UPDATE writer_commissions SET status='rejected' WHERE writer_id=$1 AND status='pending'`, [req.user.id]);
+    }
+    // Refund active broker sessions — return escrow to client
+    if (job.role === 'seed_broker') {
+      const { rows: sessions } = await client.query(
+        `SELECT client_id, escrow_seeds FROM broker_sessions WHERE broker_id=$1 AND status='active'`, [req.user.id]
+      );
+      for (const s of sessions) {
+        await client.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [s.escrow_seeds, s.client_id]);
+      }
+      await client.query(`UPDATE broker_sessions SET status='recalled', escrow_seeds=0 WHERE broker_id=$1 AND status='active'`, [req.user.id]);
+    }
+    // Refund steward retainers in progress (pro-rate remaining days)
+    if (job.role === 'steward') {
+      await client.query(`UPDATE steward_clients SET status='ended' WHERE steward_id=$1`, [req.user.id]);
+    }
+    // Refund accountant active clients
+    if (job.role === 'accountant') {
+      await client.query(`UPDATE accountant_clients SET status='ended' WHERE accountant_id=$1`, [req.user.id]);
+    }
+    // Refund farmer deposited-but-unplanted slots
+    if (job.role === 'farmer') {
+      const { rows: deposits } = await client.query(
+        `SELECT depositor_id, seeds_deposited FROM farmer_plots WHERE farmer_id=$1 AND status='deposited'`, [req.user.id]
+      );
+      for (const d of deposits) {
+        if (d.depositor_id) await client.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [d.seeds_deposited, d.depositor_id]);
+      }
+      await client.query(`UPDATE farmer_plots SET status='empty', seeds_deposited=0, depositor_id=NULL WHERE farmer_id=$1 AND status='deposited'`, [req.user.id]);
+    }
+
+    // Delete job (ratings are deleted via CASCADE from job_ratings)
+    await client.query(`DELETE FROM jobs WHERE user_id=$1`, [req.user.id]);
+    await client.query('COMMIT');
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: 'Server error' }); }
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('[resign]', e.message);
+    res.status(500).json({ error: 'Server error' });
+  } finally { client.release(); }
 });
 
 // ── POST /api/jobs/:jobId/rate — leave a rating ───────────────────────────────
