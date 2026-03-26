@@ -93,7 +93,7 @@ router.post('/register', requireAuth, async (req, res) => {
     console.log('[register] existing job:', existing);
     if (existing) return res.status(400).json({ error: 'Already registered for a job. Unregister first.' });
 
-    const rate = Math.max(JOB_META[role].baseRate, Math.floor(Number(hourlyRate) || JOB_META[role].baseRate));
+    const rate = Math.max(1, Math.floor(Number(hourlyRate) || JOB_META[role].baseRate));
     console.log('[register] inserting...', req.user.id, role, rate);
     const { rows: [job] } = await pool.query(
       `INSERT INTO jobs (user_id, role, hourly_rate, bio)
@@ -126,25 +126,27 @@ router.delete('/my', requireAuth, async (req, res) => {
     const { rows: [job] } = await client.query(`SELECT role FROM jobs WHERE user_id=$1`, [req.user.id]);
     if (!job) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'No job found' }); }
 
-    // Refund pending courier requests (seeds already taken)
+    // Refund courier — fee was already transferred at accept, claw it back
     if (job.role === 'courier') {
-      const { rows: pending } = await client.query(
+      // Refund accepted requests where money already moved
+      const { rows: accepted } = await client.query(
         `SELECT requester_id, fee_seeds FROM courier_requests WHERE courier_id=$1 AND status='accepted'`, [req.user.id]
       );
-      for (const r of pending) {
+      for (const r of accepted) {
         await client.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [r.fee_seeds, r.requester_id]);
+        await client.query(`UPDATE users SET seeds=GREATEST(0,seeds-$1) WHERE id=$3`, [r.fee_seeds, req.user.id]);
       }
-      await client.query(`UPDATE courier_requests SET status='declined' WHERE courier_id=$1 AND status IN ('pending','accepted')`, [req.user.id]);
+      await client.query(`UPDATE courier_requests SET status='refunded' WHERE courier_id=$1 AND status IN ('pending','accepted')`, [req.user.id]);
     }
-    // Refund pending writer commissions
+    // Refund pending+submitted writer commissions
     if (job.role === 'writer') {
       const { rows: pending } = await client.query(
-        `SELECT client_id, fee_seeds FROM writer_commissions WHERE writer_id=$1 AND status='pending'`, [req.user.id]
+        `SELECT client_id, fee_seeds FROM writer_commissions WHERE writer_id=$1 AND status IN ('pending','submitted')`, [req.user.id]
       );
       for (const r of pending) {
         await client.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [r.fee_seeds, r.client_id]);
       }
-      await client.query(`UPDATE writer_commissions SET status='rejected' WHERE writer_id=$1 AND status='pending'`, [req.user.id]);
+      await client.query(`UPDATE writer_commissions SET status='refunded' WHERE writer_id=$1 AND status IN ('pending','submitted')`, [req.user.id]);
     }
     // Refund active broker sessions — return escrow to client
     if (job.role === 'seed_broker') {

@@ -23,6 +23,22 @@ function courierTierForDeliveries(n) {
 }
 
 // ── COURIER ───────────────────────────────────────────────────────────────────
+
+// GET /api/job-actions/courier/my-requests — client sees their courier requests
+router.get('/courier/my-requests', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT cr.id, cr.from_country, cr.to_country, cr.est_hours, cr.fee_seeds,
+              cr.status, cr.created_at, cr.recipient_label,
+              COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS courier_name
+       FROM courier_requests cr JOIN users u ON u.id=cr.courier_id
+       WHERE cr.requester_id=$1 ORDER BY cr.created_at DESC LIMIT 20`,
+      [req.user.id]
+    )
+    res.json({ requests: rows })
+  } catch (e) { res.status(500).json({ error: 'Server error' }) }
+})
+
 // GET /api/job-actions/courier/queue — delivery requests for this courier
 router.get('/courier/queue', requireAuth, async (req, res) => {
   try {
@@ -31,7 +47,7 @@ router.get('/courier/queue', requireAuth, async (req, res) => {
 
     const { rows } = await pool.query(
       `SELECT cr.id, cr.from_country, cr.to_country, cr.est_hours, cr.fee_seeds,
-              cr.status, cr.created_at,
+              cr.status, cr.created_at, cr.recipient_label,
               COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS sender_name,
               u.city AS sender_city, u.country AS sender_country
        FROM courier_requests cr
@@ -94,10 +110,12 @@ router.patch('/courier/request/:id', requireAuth, async (req, res) => {
   const { action } = req.body // 'accept' | 'decline'
   try {
     const newStatus = action === 'accept' ? 'accepted' : 'declined'
+    // Use separate params to avoid PostgreSQL type deduction conflict
     const { rows: [cr] } = await pool.query(
-      `UPDATE courier_requests SET status=$1, accepted_at=CASE WHEN $1::text='accepted' THEN NOW() ELSE NULL END
+      `UPDATE courier_requests SET status=$1::varchar,
+       accepted_at = CASE WHEN $4::boolean THEN NOW() ELSE NULL END
        WHERE id=$2 AND courier_id=$3 AND status='pending' RETURNING *`,
-      [newStatus, req.params.id, req.user.id]
+      [newStatus, req.params.id, req.user.id, action === 'accept']
     )
     if (!cr) return res.status(404).json({ error: 'Request not found' })
 
@@ -139,7 +157,9 @@ router.get('/writer/my-commissions', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT wc.id, wc.prompt, wc.fee_seeds, wc.status, wc.created_at,
-              CASE WHEN wc.status='accepted' THEN wc.content ELSE NULL END AS content,
+              CASE WHEN wc.status IN ('accepted') THEN wc.content
+                   WHEN wc.status = 'submitted' THEN wc.content
+                   ELSE NULL END AS content,
               COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS writer_name
        FROM writer_commissions wc JOIN users u ON u.id = wc.writer_id
        WHERE wc.client_id=$1 ORDER BY wc.created_at DESC LIMIT 20`,
@@ -329,7 +349,7 @@ router.post('/broker/close', requireAuth, async (req, res) => {
 
     await pool.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [Math.max(0, clientGet), session.client_id])
     await pool.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [brokerCut, req.user.id])
-    await pool.query(`UPDATE broker_sessions SET status='closed' WHERE id=$1`, [sessionId])
+    await pool.query(`UPDATE broker_sessions SET status='settled' WHERE id=$1`, [sessionId])
 
     res.json({ ok: true, clientGet: Math.max(0, clientGet), brokerCut, profit, mult: mult.toFixed(2) })
   } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
@@ -520,20 +540,37 @@ router.post('/steward/hire', requireAuth, async (req, res) => {
   } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
 })
 
-// POST /api/job-actions/steward/nudge — steward sends a streak warning
+// POST /api/job-actions/steward/nudge — steward sends push + instant letter
 router.post('/steward/nudge', requireAuth, async (req, res) => {
   const { clientId } = req.body
   try {
     const { rows: [rel] } = await pool.query(
-      `SELECT id FROM steward_clients WHERE steward_id=$1 AND client_id=$2 AND status='active'`,
+      `SELECT sc.id, COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS steward_name
+       FROM steward_clients sc JOIN users u ON u.id=sc.steward_id
+       WHERE sc.steward_id=$1 AND sc.client_id=$2 AND sc.status='active'`,
       [req.user.id, clientId]
     )
     if (!rel) return res.status(403).json({ error: 'Not your client' })
-    // Crude rises — streak saver = fuel activity
+
+    // Push notification
     updateMarketPrice('crude', 8).catch(() => {})
-    sendPush(clientId, '⌛ Streak at risk!', 'Your Steward warns: send a letter today or your streak breaks!', '/letters').catch(() => {})
+    sendPush(clientId, '⌛ Streak at risk!', `Your Steward ${rel.steward_name} says: send a letter today!`, '/letters').catch(() => {})
+
+    // Instant letter — arrives now (0 delivery time), no seeds, no streak impact
+    const nudgeMsg = `🔔 Streak reminder from your Steward ${rel.steward_name}:
+
+You haven't sent a letter to one of your connections today and your streak fuel is running low.
+
+Send a letter now before your streak breaks! Every letter counts. 💌`
+    const now = new Date()
+    await pool.query(
+      `INSERT INTO letters (sender_id, recipient_id, content, vehicle_tier, arrives_at, expires_at, streak_at_send, distance_km, delivery_ms, seeds_awarded)
+       VALUES ($1,$2,$3,'steward_nudge',$4,$5,0,0,0,true)`,
+      [req.user.id, clientId, nudgeMsg, now, new Date(now.getTime() + 7*24*3600000)]
+    )
+
     res.json({ ok: true })
-  } catch (e) { res.status(500).json({ error: 'Server error' }) }
+  } catch (e) { console.error('[steward nudge]', e.message); res.status(500).json({ error: 'Server error' }) }
 })
 
 // ── FORECASTER ────────────────────────────────────────────────────────────────
@@ -628,6 +665,33 @@ router.post('/forecaster/subscribe', requireAuth, async (req, res) => {
 
 // ── FARMER ────────────────────────────────────────────────────────────────────
 const HARVEST_HOURS = 24
+
+// POST /api/job-actions/farmer/buy-plot — farmer pays 100 seeds to unlock a new slot
+router.post('/farmer/buy-plot', requireAuth, async (req, res) => {
+  const PLOT_COST = 100
+  try {
+    const { rows: [job] } = await pool.query(
+      `SELECT id FROM jobs WHERE user_id=$1 AND role='farmer'`, [req.user.id]
+    )
+    if (!job) return res.status(403).json({ error: 'Not a farmer' })
+    // Count existing slots
+    const { rows: [cnt] } = await pool.query(
+      `SELECT COUNT(*) AS n FROM farmer_plots WHERE farmer_id=$1`, [req.user.id]
+    )
+    const currentSlots = parseInt(cnt.n)
+    if (currentSlots >= 5) return res.status(400).json({ error: 'Already at maximum 5 plots' })
+    // Check seeds
+    const { rows: [me] } = await pool.query(`SELECT seeds FROM users WHERE id=$1`, [req.user.id])
+    if ((me?.seeds || 0) < PLOT_COST) return res.status(400).json({ error: `Need 🌱${PLOT_COST} seeds to buy a plot` })
+    // Deduct and create slot
+    await pool.query(`UPDATE users SET seeds=seeds-$1 WHERE id=$2`, [PLOT_COST, req.user.id])
+    await pool.query(
+      `INSERT INTO farmer_plots (farmer_id, slot_index, seeds_deposited, status) VALUES ($1,$2,0,'empty')`,
+      [req.user.id, currentSlots]
+    )
+    res.json({ ok: true, slotIndex: currentSlots, seedsSpent: PLOT_COST })
+  } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
+})
 
 // GET /api/job-actions/farmer/plot — farmer sees their plot
 router.get('/farmer/plot', requireAuth, async (req, res) => {
