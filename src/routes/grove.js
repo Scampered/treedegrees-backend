@@ -1,6 +1,7 @@
 // src/routes/grove.js — Seeds currency, stock scores, investments
 import { Router } from 'express';
 import pool from '../db/pool.js';
+import { notify } from '../utils/notify.js';
 import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();

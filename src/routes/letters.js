@@ -1,6 +1,7 @@
 // src/routes/letters.js
 import { Router } from 'express';
 import pool from '../db/pool.js';
+import { notify } from '../utils/notify.js';
 import { requireAuth } from '../middleware/auth.js';
 import {
   getVehicleTier, haversineKm, calcDeliveryMs,
@@ -107,6 +108,20 @@ router.post('/', requireAuth, async (req, res) => {
        RETURNING id, sent_at, arrives_at, vehicle_tier`,
       [req.user.id, recipientId, content.trim(), tier, arrivesAt, expiresAt, streak.streak_days, Math.round(distKm), Math.round(deliveryMs)]
     );
+
+    // Notify recipient
+    const senderDisplay = req.user.nickname || req.user.full_name?.split(' ')[0] || 'Someone'
+    notify(recipientId, 'letter_arrived',
+      `✉️ Letter from ${senderDisplay}`,
+      `A letter is on its way and will arrive soon.`,
+      '/letters'
+    ).catch(() => {})
+    // Notify sender
+    notify(req.user.id, 'letter_sent',
+      `✉️ Letter sent`,
+      `Your letter is in transit.`,
+      '/letters'
+    ).catch(() => {})
 
     // Use sender's local date so streak day boundaries respect their timezone
     const senderLocalDate = req.body.senderLocalDate || new Date().toISOString().split('T')[0];

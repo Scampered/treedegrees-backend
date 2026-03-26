@@ -3,6 +3,7 @@ import { Router } from 'express';
 import pool from '../db/pool.js';
 import { requireAuth } from '../middleware/auth.js';
 import { updateMarketPrice } from '../utils/marketEvents.js';
+import { notify } from '../utils/notify.js';
 import { sendPush } from '../utils/push.js';
 
 const router = Router();
@@ -130,6 +131,7 @@ router.post('/courier/request', requireAuth, async (req, res) => {
 
     // Notify courier
     sendPush(courierId, '🚐 New delivery request!', `Someone in ${me.country} needs a delivery.`, '/jobs').catch(() => {})
+    notify(courierId, 'job_hired', '🚐 Delivery request', `Someone needs a delivery from ${me.country}.`, '/jobs').catch(() => {})
     // Crude rises — courier activity = fuel burn
     updateMarketPrice('crude', 3).catch(() => {})
 
@@ -220,6 +222,7 @@ router.post('/writer/commission', requireAuth, async (req, res) => {
       [req.user.id, writerId, prompt.slice(0, 300), fee]
     )
     sendPush(writerId, '✍️ New commission!', `Someone wants a "${prompt.slice(0, 50)}" letter.`, '/jobs').catch(() => {})
+    notify(writerId, 'job_hired', '✍️ New commission', `Someone commissioned a letter from you.`, '/jobs').catch(() => {})
     res.json({ ok: true, commissionId: comm.id })
   } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
 })
@@ -236,6 +239,7 @@ router.patch('/writer/commission/:id/submit', requireAuth, async (req, res) => {
     )
     if (!comm) return res.status(404).json({ error: 'Commission not found' })
     sendPush(comm.client_id, '✍️ Your letter is ready!', 'A writer submitted your commission. Accept or reject it.', '/jobs').catch(() => {})
+    notify(comm.client_id, 'job_commission', '✍️ Letter ready to review', 'A writer submitted your commissioned letter.', '/jobs').catch(() => {})
     res.json({ ok: true })
   } catch (e) { res.status(500).json({ error: 'Server error' }) }
 })
@@ -533,6 +537,7 @@ router.post('/accountant/advice', requireAuth, async (req, res) => {
       [sessionId, action, amount || 0, (note || '').slice(0, 200), investmentIdx || 0]
     )
     sendPush(session.client_id, '📊 Accountant advice!', `Your accountant says: ${action.toUpperCase()}`, '/jobs').catch(() => {})
+    notify(session.client_id, 'job_advice', '📊 Accountant advice', `Your accountant recommends: ${action.toUpperCase()}${note ? ` — ${note.slice(0,60)}` : ''}`, '/jobs').catch(() => {})
     res.json({ ok: true })
   } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
 })
@@ -635,6 +640,7 @@ router.post('/steward/hire', requireAuth, async (req, res) => {
       [stewardId, req.user.id, proratedFee, days, expiresAt]
     )
     sendPush(stewardId, '🔔 New client!', 'Someone hired you as their Steward.', '/jobs').catch(() => {})
+    notify(stewardId, 'job_hired', '🔔 New steward client', 'Someone hired you as their Steward.', '/jobs').catch(() => {})
     res.json({ ok: true })
   } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
 })
@@ -739,6 +745,7 @@ router.post('/forecaster/post', requireAuth, async (req, res) => {
     )
     for (const s of subs) {
       sendPush(s.subscriber_id, '📡 Forecast update!', content.slice(0, 80), '/jobs').catch(() => {})
+      notify(s.subscriber_id, 'forecaster_post', '📡 Forecast update', content.slice(0, 100), '/jobs').catch(() => {})
     }
     res.json({ ok: true, notified: subs.length })
   } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
@@ -893,6 +900,7 @@ router.post('/farmer/deposit', requireAuth, async (req, res) => {
       [amt, req.user.id, job.hourly_rate, slot.id]
     )
     sendPush(farmerId, '🌾 New deposit!', `${amt} seeds waiting to be planted! Plant within 1 hour.`, '/jobs').catch(() => {})
+    notify(farmerId, 'job_hired', '🌾 Seeds deposited', `${amt} seeds are waiting to be planted.`, '/jobs').catch(() => {})
     res.json({ ok: true, slotIndex: slot.slot_index })
   } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
 })

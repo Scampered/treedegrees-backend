@@ -1,5 +1,6 @@
 // src/utils/arrivedPoller.js
 import pool from '../db/pool.js';
+import { notify } from './notify.js';
 
 const MAX_MS = 72 * 3600 * 1000;
 
@@ -42,4 +43,3 @@ export function startArrivedPoller() {
   processArrived();
   setInterval(processArrived, 60 * 1000);
 }
-// fix 

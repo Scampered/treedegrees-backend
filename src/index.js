@@ -18,6 +18,7 @@ import groveRoutes from './routes/grove.js';
 import marketRoutes from './routes/market.js';
 import pushRoutes from './routes/push.js';
 import jobsRoutes from './routes/jobs.js';
+import notificationsRoutes from './routes/notifications.js';
 import jobActionsRoutes from './routes/jobActions.js';
 import { startStewardPoller } from './utils/stewardPoller.js';
 import { startArrivedPoller } from './utils/arrivedPoller.js';
@@ -150,6 +151,7 @@ app.use('/api/games',     apiLimiter,  gamesRoutes);
 app.use('/api/market',    apiLimiter,  marketRoutes);
 app.use('/api/push',      apiLimiter,  pushRoutes);
 app.use('/api/jobs',      apiLimiter,  jobsRoutes);
+app.use('/api/notifications', apiLimiter, notificationsRoutes);
 app.use('/api/job-actions', apiLimiter, jobActionsRoutes);
 app.use('/api/grove',     apiLimiter,  groveRoutes);
 
