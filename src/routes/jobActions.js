@@ -69,10 +69,15 @@ router.post('/courier/request', requireAuth, async (req, res) => {
 
     const fromLabel = [me.city, me.country].filter(Boolean).join(', ') || 'Unknown'
     const toLabel   = [courier.city, courier.country].filter(Boolean).join(', ') || 'Unknown'
+    const { recipientId } = req.body
+    const recipientLabel = recipientId ? await pool.query(
+      `SELECT COALESCE(nickname, split_part(full_name,' ',1)) AS name, city, country FROM users WHERE id=$1`, [recipientId]
+    ).then(r => { const u = r.rows[0]; return u ? `${u.name} (${[u.city,u.country].filter(Boolean).join(', ')})` : 'Unknown' }) : 'Not specified'
+
     const { rows: [req2] } = await pool.query(
-      `INSERT INTO courier_requests (requester_id, courier_id, from_country, to_country, est_hours, fee_seeds)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-      [req.user.id, courierId, fromLabel, toLabel, estHours, courier.hourly_rate]
+      `INSERT INTO courier_requests (requester_id, courier_id, from_country, to_country, est_hours, fee_seeds, recipient_label)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+      [req.user.id, courierId, fromLabel, toLabel, estHours, courier.hourly_rate, recipientLabel]
     )
 
     // Notify courier
@@ -88,10 +93,11 @@ router.post('/courier/request', requireAuth, async (req, res) => {
 router.patch('/courier/request/:id', requireAuth, async (req, res) => {
   const { action } = req.body // 'accept' | 'decline'
   try {
+    const newStatus = action === 'accept' ? 'accepted' : 'declined'
     const { rows: [cr] } = await pool.query(
-      `UPDATE courier_requests SET status=$1, accepted_at=CASE WHEN $1='accepted' THEN NOW() ELSE NULL END
+      `UPDATE courier_requests SET status=$1, accepted_at=CASE WHEN $1::text='accepted' THEN NOW() ELSE NULL END
        WHERE id=$2 AND courier_id=$3 AND status='pending' RETURNING *`,
-      [action === 'accept' ? 'accepted' : 'declined', req.params.id, req.user.id]
+      [newStatus, req.params.id, req.user.id]
     )
     if (!cr) return res.status(404).json({ error: 'Request not found' })
 
@@ -269,6 +275,8 @@ router.post('/broker/invest', requireAuth, async (req, res) => {
     )
     if (!session) return res.status(404).json({ error: 'Session not found' })
     if (session.escrow_seeds <= 0) return res.status(400).json({ error: 'No seeds to invest' })
+    if (targetId === req.user.id) return res.status(400).json({ error: 'Cannot invest in yourself' })
+    if (targetId === session.client_id) return res.status(400).json({ error: 'Cannot invest client money back into the client' })
 
     // Get target price
     let priceAtInvest = 0
@@ -461,7 +469,8 @@ router.get('/steward/dashboard', requireAuth, async (req, res) => {
   try {
     const { rows: clients } = await pool.query(
       `SELECT sc.id AS steward_client_id, sc.client_id, sc.fee_seeds, sc.last_paid_at, sc.retainer_days,
-              u.seeds AS client_seeds
+              u.seeds AS client_seeds,
+              COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS client_name
        FROM steward_clients sc JOIN users u ON u.id=sc.client_id
        WHERE sc.steward_id=$1 AND sc.status='active'`,
       [req.user.id]
@@ -494,7 +503,7 @@ router.post('/steward/hire', requireAuth, async (req, res) => {
     const { rows: [cnt] } = await pool.query(
       `SELECT COUNT(*) AS n FROM steward_clients WHERE steward_id=$1 AND status='active'`, [stewardId]
     )
-    if (parseInt(cnt.n) >= 10) return res.status(400).json({ error: 'Steward is at capacity (10 clients)' })
+    if (parseInt(cnt.n) >= 3) return res.status(400).json({ error: 'Steward is at capacity (3 clients max)' })
     // Charge first retainer
     const { rows: [me] } = await pool.query(`SELECT seeds FROM users WHERE id=$1`, [req.user.id])
     if ((me?.seeds || 0) < st.hourly_rate) return res.status(400).json({ error: 'Not enough seeds' })
@@ -580,10 +589,14 @@ router.post('/forecaster/post', requireAuth, async (req, res) => {
       `INSERT INTO forecaster_posts (forecaster_id, content) VALUES ($1,$2)`,
       [req.user.id, content.slice(0, 500)]
     )
-    // Canopy rises when forecasters post (market activity signal)
+    // Update forecaster's daily note so subscribers see it as a note
+    const noteText = `📡 ${content.slice(0, 200)}`
+    await pool.query(
+      `UPDATE users SET daily_note=$1, daily_note_updated_at=NOW() WHERE id=$2`,
+      [noteText, req.user.id]
+    )
     updateMarketPrice('canopy', 3).catch(() => {})
 
-    // Push to all subscribers
     const { rows: subs } = await pool.query(
       `SELECT subscriber_id FROM forecaster_subscribers WHERE forecaster_id=$1`, [req.user.id]
     )
@@ -686,7 +699,24 @@ router.post('/farmer/deposit', requireAuth, async (req, res) => {
     const { rows: [slot] } = await pool.query(
       `SELECT * FROM farmer_plots WHERE farmer_id=$1 AND status='empty' LIMIT 1`, [farmerId]
     )
-    if (!slot) return res.status(400).json({ error: 'No empty slots available' })
+    if (!slot) {
+      // Auto-create plots if farmer registered but plots weren't seeded
+      const { rows: existing } = await pool.query(`SELECT COUNT(*) AS n FROM farmer_plots WHERE farmer_id=$1`, [farmerId])
+      if (parseInt(existing[0].n) === 0) {
+        for (let i = 0; i < 5; i++) {
+          await pool.query(
+            `INSERT INTO farmer_plots (farmer_id, slot_index, seeds_deposited, status) VALUES ($1,$2,0,'empty') ON CONFLICT DO NOTHING`,
+            [farmerId, i]
+          )
+        }
+        const { rows: [newSlot] } = await pool.query(`SELECT * FROM farmer_plots WHERE farmer_id=$1 AND status='empty' LIMIT 1`, [farmerId])
+        if (!newSlot) return res.status(400).json({ error: 'No empty slots available' })
+        // use newSlot — re-assign
+        Object.assign(slot || {}, newSlot)
+      } else {
+        return res.status(400).json({ error: 'No empty slots available — all 5 slots are occupied' })
+      }
+    }
     const { rows: [me] } = await pool.query(`SELECT seeds FROM users WHERE id=$1`, [req.user.id])
     if ((me?.seeds || 0) < amt) return res.status(400).json({ error: 'Not enough seeds' })
 

@@ -44,6 +44,13 @@ router.get('/listings', requireAuth, async (req, res) => {
               ) AS has_rated
        FROM jobs j JOIN users u ON u.id = j.user_id
        WHERE j.active = true
+         AND j.user_id != $1
+         AND EXISTS(
+           SELECT 1 FROM friendships f
+           WHERE f.status='accepted'
+             AND ((f.user_id_1=$1 AND f.user_id_2=j.user_id)
+               OR (f.user_id_2=$1 AND f.user_id_1=j.user_id))
+         )
        ORDER BY
          CASE WHEN j.rating_count > 0 THEN j.rating_sum::float / j.rating_count ELSE 0 END DESC,
          j.registered_at ASC`,
