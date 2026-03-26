@@ -39,6 +39,38 @@ router.get('/courier/my-requests', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Server error' }) }
 })
 
+
+// POST /api/job-actions/services/mark-read — client marks service responses as read
+router.post('/services/mark-read', requireAuth, async (req, res) => {
+  try {
+    await pool.query(
+      `INSERT INTO service_response_reads (user_id, read_at) VALUES ($1, NOW())
+       ON CONFLICT (user_id) DO UPDATE SET read_at=NOW()`,
+      [req.user.id]
+    )
+    res.json({ ok: true })
+  } catch (e) { res.status(500).json({ error: 'Server error' }) }
+})
+
+// GET /api/job-actions/services/unread-count — how many new items since last read
+router.get('/services/unread-count', requireAuth, async (req, res) => {
+  try {
+    const { rows: [r] } = await pool.query(
+      `SELECT read_at FROM service_response_reads WHERE user_id=$1`, [req.user.id]
+    )
+    const since = r?.read_at || new Date(0)
+    const { rows: [cnt] } = await pool.query(`
+      SELECT (
+        (SELECT COUNT(*) FROM writer_commissions WHERE client_id=$1 AND created_at > $2) +
+        (SELECT COUNT(*) FROM courier_requests WHERE requester_id=$1 AND created_at > $2) +
+        (SELECT COUNT(*) FROM accountant_advice aa JOIN accountant_clients ac ON ac.id=aa.session_id
+          WHERE ac.client_id=$1 AND aa.created_at > $2 AND aa.read_at IS NULL)
+      ) AS n
+    `, [req.user.id, since])
+    res.json({ count: parseInt(cnt.n) })
+  } catch (e) { res.status(500).json({ error: 'Server error' }) }
+})
+
 // GET /api/job-actions/courier/queue — delivery requests for this courier
 router.get('/courier/queue', requireAuth, async (req, res) => {
   try {
@@ -220,15 +252,22 @@ router.patch('/writer/commission/:id/resolve', requireAuth, async (req, res) => 
     if (!comm) return res.status(404).json({ error: 'Commission not found or not submitted' })
 
     if (action === 'accept') {
-      // Full fee to writer
-      await pool.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [comm.fee_seeds, comm.writer_id])
+      // Pay writer if they still exist (may have resigned — writer_id nullable now)
+      if (comm.writer_id) {
+        await pool.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [comm.fee_seeds, comm.writer_id])
+      }
+      // If writer resigned, seeds stay with client since they already paid — just keep the letter
     } else {
-      // Kill fee: 15% back to writer even on rejection
-      const killFee = Math.max(1, Math.floor(comm.fee_seeds * 0.15))
-      await pool.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [killFee, comm.writer_id])
-      // Refund rest to client
-      const refund = comm.fee_seeds - killFee
-      await pool.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [refund, req.user.id])
+      // Kill fee: 15% to writer if they still exist
+      if (comm.writer_id) {
+        const killFee = Math.max(1, Math.floor(comm.fee_seeds * 0.15))
+        await pool.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [killFee, comm.writer_id])
+        const refund = comm.fee_seeds - killFee
+        await pool.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [refund, req.user.id])
+      } else {
+        // Writer gone — full refund to client
+        await pool.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [comm.fee_seeds, req.user.id])
+      }
     }
     res.json({ ok: true })
   } catch (e) { res.status(500).json({ error: 'Server error' }) }
@@ -285,20 +324,27 @@ router.post('/broker/open', requireAuth, async (req, res) => {
   } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
 })
 
-// POST /api/job-actions/broker/invest — broker invests client escrow
+// POST /api/job-actions/broker/invest — allocate a specific amount into a target
 router.post('/broker/invest', requireAuth, async (req, res) => {
-  const { sessionId, targetId, targetType } = req.body
+  const { sessionId, targetId, targetType, amount } = req.body
+  const amt = Math.max(1, Math.floor(Number(amount) || 0))
   try {
     const { rows: [session] } = await pool.query(
       `SELECT * FROM broker_sessions WHERE id=$1 AND broker_id=$2 AND status='active'`,
       [sessionId, req.user.id]
     )
     if (!session) return res.status(404).json({ error: 'Session not found' })
-    if (session.escrow_seeds <= 0) return res.status(400).json({ error: 'No seeds to invest' })
     if (targetId === req.user.id) return res.status(400).json({ error: 'Cannot invest in yourself' })
-    if (targetId === session.client_id) return res.status(400).json({ error: 'Cannot invest client money back into the client' })
+    if (targetId === session.client_id) return res.status(400).json({ error: 'Cannot invest client money into themselves' })
 
-    // Get target price
+    // Check enough unallocated escrow remains
+    const { rows: [allocated] } = await pool.query(
+      `SELECT COALESCE(SUM(amount),0) AS total FROM broker_allocations WHERE session_id=$1 AND NOT settled`,
+      [sessionId]
+    )
+    const remaining = session.escrow_seeds - parseInt(allocated.total)
+    if (amt > remaining) return res.status(400).json({ error: `Only ${remaining} seeds unallocated` })
+
     let priceAtInvest = 0
     if (targetType === 'grove' && targetId) {
       const { rows: [t] } = await pool.query(`SELECT seeds FROM users WHERE id=$1`, [targetId])
@@ -309,50 +355,96 @@ router.post('/broker/invest', requireAuth, async (req, res) => {
     }
 
     await pool.query(
-      `UPDATE broker_sessions SET target_type=$1, target_user_id=$2, price_at_invest=$3 WHERE id=$4`,
-      [targetType || 'grove', targetId || null, priceAtInvest, sessionId]
+      `INSERT INTO broker_allocations (session_id, target_type, target_user_id, amount, price_at_invest)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [sessionId, targetType || 'grove', targetId || null, amt, priceAtInvest]
     )
-    res.json({ ok: true, priceAtInvest })
+    res.json({ ok: true, allocated: amt, remaining: remaining - amt })
+  } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
+})
+
+// GET /api/job-actions/broker/allocations — broker sees their allocations for active session
+router.get('/broker/allocations/:sessionId', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT ba.id, ba.target_type, ba.target_user_id, ba.amount, ba.price_at_invest,
+              ba.settled, ba.return_amount, ba.created_at,
+              COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS target_name
+       FROM broker_allocations ba
+       LEFT JOIN users u ON u.id=ba.target_user_id
+       WHERE ba.session_id=$1 ORDER BY ba.created_at`,
+      [req.params.sessionId]
+    )
+    const { rows: [session] } = await pool.query(
+      `SELECT escrow_seeds FROM broker_sessions WHERE id=$1 AND broker_id=$2`,
+      [req.params.sessionId, req.user.id]
+    )
+    if (!session) return res.status(403).json({ error: 'Not your session' })
+    const totalAllocated = rows.filter(r => !r.settled).reduce((s, r) => s + parseInt(r.amount), 0)
+    res.json({ allocations: rows, escrow: session.escrow_seeds, unallocated: session.escrow_seeds - totalAllocated })
   } catch (e) { res.status(500).json({ error: 'Server error' }) }
 })
 
-// POST /api/job-actions/broker/close — close session and distribute returns
+// POST /api/job-actions/broker/close — settle all allocations and return unallocated seeds
 router.post('/broker/close', requireAuth, async (req, res) => {
   const { sessionId } = req.body
+  const client = await pool.connect()
   try {
-    const { rows: [session] } = await pool.query(
+    await client.query('BEGIN')
+    const { rows: [session] } = await client.query(
       `SELECT * FROM broker_sessions WHERE id=$1 AND broker_id=$2 AND status='active'`,
       [sessionId, req.user.id]
     )
-    if (!session) return res.status(404).json({ error: 'Session not found' })
+    if (!session) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Session not found' }) }
 
-    // Get current value of target
-    let currentPrice = parseFloat(session.price_at_invest)
-    if (session.target_type === 'grove' && session.target_user_id) {
-      const { rows: [t] } = await pool.query(`SELECT seeds FROM users WHERE id=$1`, [session.target_user_id])
-      currentPrice = t?.seeds || currentPrice
-    } else if (['canopy','crude'].includes(session.target_type)) {
-      const { rows: [ms] } = await pool.query(`SELECT price FROM market_state WHERE market=$1`, [session.target_type])
-      currentPrice = parseFloat(ms?.price || currentPrice)
+    const { rows: allocations } = await client.query(
+      `SELECT * FROM broker_allocations WHERE session_id=$1 AND NOT settled`, [sessionId]
+    )
+
+    let totalClientGet = 0, totalBrokerCut = 0, totalAllocated = 0
+
+    for (const alloc of allocations) {
+      let currentPrice = parseFloat(alloc.price_at_invest)
+      if (alloc.target_type === 'grove' && alloc.target_user_id) {
+        const { rows: [t] } = await client.query(`SELECT seeds FROM users WHERE id=$1`, [alloc.target_user_id])
+        currentPrice = t?.seeds || currentPrice
+      } else if (['canopy','crude'].includes(alloc.target_type)) {
+        const { rows: [ms] } = await client.query(`SELECT price FROM market_state WHERE market=$1`, [alloc.target_type])
+        currentPrice = parseFloat(ms?.price || currentPrice)
+      }
+      const baseline = Math.max(1, parseFloat(alloc.price_at_invest))
+      const mult     = Math.min(10, Math.max(0, currentPrice / baseline))
+      const activeVal= Math.floor(alloc.amount * mult)
+      const fee      = Math.floor(activeVal * BROKER_FEE)
+      const gross    = activeVal - fee
+      const profit   = gross - alloc.amount
+      const cut      = profit > 0 ? Math.floor(profit * 0.10) : 0
+      const clientGet= Math.max(0, gross - cut)
+
+      totalClientGet += clientGet
+      totalBrokerCut += cut
+      totalAllocated += alloc.amount
+
+      await client.query(
+        `UPDATE broker_allocations SET settled=true, settled_at=NOW(), return_amount=$1 WHERE id=$2`,
+        [clientGet, alloc.id]
+      )
     }
 
-    const baseline  = Math.max(1, parseFloat(session.price_at_invest))
-    const mult      = Math.min(10, Math.max(0, currentPrice / baseline))
-    const principal = session.escrow_seeds
-    // 100% active for broker sessions (no safe half)
-    const activeVal = Math.floor(principal * mult)
-    const fee       = Math.floor(activeVal * BROKER_FEE) // flat 5%
-    const gross     = activeVal - fee
-    const profit    = gross - principal
-    const brokerCut = profit > 0 ? Math.floor(profit * 0.10) : 0 // broker 10% of profits
-    const clientGet = gross - brokerCut
+    // Return any unallocated seeds directly
+    const unallocated = session.escrow_seeds - totalAllocated
+    if (unallocated > 0) totalClientGet += unallocated
 
-    await pool.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [Math.max(0, clientGet), session.client_id])
-    await pool.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [brokerCut, req.user.id])
-    await pool.query(`UPDATE broker_sessions SET status='settled' WHERE id=$1`, [sessionId])
+    await client.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [totalClientGet, session.client_id])
+    await client.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [totalBrokerCut, req.user.id])
+    await client.query(`UPDATE broker_sessions SET status='settled', escrow_seeds=0 WHERE id=$1`, [sessionId])
+    await client.query('COMMIT')
 
-    res.json({ ok: true, clientGet: Math.max(0, clientGet), brokerCut, profit, mult: mult.toFixed(2) })
-  } catch (e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
+    res.json({ ok: true, clientGet: totalClientGet, brokerCut: totalBrokerCut })
+  } catch (e) {
+    await client.query('ROLLBACK')
+    console.error(e.message); res.status(500).json({ error: 'Server error' })
+  } finally { client.release() }
 })
 
 // ── ACCOUNTANT ────────────────────────────────────────────────────────────────
@@ -528,12 +620,19 @@ router.post('/steward/hire', requireAuth, async (req, res) => {
     const { rows: [me] } = await pool.query(`SELECT seeds FROM users WHERE id=$1`, [req.user.id])
     if ((me?.seeds || 0) < st.hourly_rate) return res.status(400).json({ error: 'Not enough seeds' })
 
-    await pool.query(`UPDATE users SET seeds=seeds-$1 WHERE id=$2`, [st.hourly_rate, req.user.id])
-    await pool.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [st.hourly_rate, stewardId])
+    // Prorate: 7 days = full rate, 3 days = rate * 3/7, 14 days = rate * 2
+    const proratedFee = days === 7 ? st.hourly_rate
+                      : days === 3 ? Math.ceil(st.hourly_rate * 3 / 7)
+                      : Math.ceil(st.hourly_rate * days / 7)
+    if ((me?.seeds || 0) < proratedFee) return res.status(400).json({ error: 'Not enough seeds' })
+
+    await pool.query(`UPDATE users SET seeds=seeds-$1 WHERE id=$2`, [proratedFee, req.user.id])
+    await pool.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [proratedFee, stewardId])
+    const expiresAt = new Date(Date.now() + days * 24 * 3600000)
     await pool.query(
-      `INSERT INTO steward_clients (steward_id, client_id, fee_seeds, retainer_days) VALUES ($1,$2,$3,$4)
-       ON CONFLICT (steward_id, client_id) DO UPDATE SET status='active', last_paid_at=NOW()`,
-      [stewardId, req.user.id, st.hourly_rate, days]
+      `INSERT INTO steward_clients (steward_id, client_id, fee_seeds, retainer_days, expires_at) VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (steward_id, client_id) DO UPDATE SET status='active', last_paid_at=NOW(), expires_at=$5, retainer_days=$4, fee_seeds=$3`,
+      [stewardId, req.user.id, proratedFee, days, expiresAt]
     )
     sendPush(stewardId, '🔔 New client!', 'Someone hired you as their Steward.', '/jobs').catch(() => {})
     res.json({ ok: true })
@@ -545,7 +644,8 @@ router.post('/steward/nudge', requireAuth, async (req, res) => {
   const { clientId } = req.body
   try {
     const { rows: [rel] } = await pool.query(
-      `SELECT sc.id, COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS steward_name
+      `SELECT sc.id, sc.nudges_today, sc.nudge_reset_date,
+              COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS steward_name
        FROM steward_clients sc JOIN users u ON u.id=sc.steward_id
        WHERE sc.steward_id=$1 AND sc.client_id=$2 AND sc.status='active'`,
       [req.user.id, clientId]

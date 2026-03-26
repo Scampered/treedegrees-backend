@@ -301,7 +301,11 @@ router.post('/withdraw', requireAuth, async (req, res) => {
     const activeHalf  = Math.floor(principal / 2);
     const safeHalf    = principal - activeHalf;
     const activeValue = Math.floor(activeHalf * multiplier);
-    const feeRate     = withdrawFeeRate(principal);
+    // Farmers pay no withdrawal fee
+    const { rows: [isFarmer] } = await pool.query(
+      `SELECT 1 FROM jobs WHERE user_id=$1 AND role='farmer' AND active=true`, [req.user.id]
+    )
+    const feeRate = isFarmer ? 0 : withdrawFeeRate(principal);
     const fee         = Math.floor(activeValue * feeRate);
     const payout      = safeHalf + activeValue - fee;
 
