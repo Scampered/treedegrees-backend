@@ -50,10 +50,10 @@ router.patch('/profile', requireAuth, async (req, res) => {
       const sameCountry = !country || country === cur?.country;
       if (!sameCity || !sameCountry) {
         if (cur?.location_changed_at) {
-          const daysSince = (Date.now() - new Date(cur.location_changed_at)) / 86400000;
-          if (daysSince < 7) {
-            const daysLeft = Math.ceil(7 - daysSince);
-            return res.status(429).json({ error: `Location can only be changed every 7 days. ${daysLeft} day(s) remaining.` });
+          const hoursSince = (Date.now() - new Date(cur.location_changed_at)) / 3600000;
+          if (hoursSince < 48) {
+            const hoursLeft = Math.ceil(48 - hoursSince);
+            return res.status(429).json({ error: `Location can only be changed every 48 hours. ${hoursLeft}h remaining. Note: your map position will be locked until then.` });
           }
         }
       }

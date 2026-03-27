@@ -20,7 +20,7 @@ import pushRoutes from './routes/push.js';
 import jobsRoutes from './routes/jobs.js';
 import notificationsRoutes from './routes/notifications.js';
 import jobActionsRoutes from './routes/jobActions.js';
-import { startStewardPoller } from './utils/stewardPoller.js';
+import { startJobPollers } from './utils/jobPollers.js';
 import { startArrivedPoller } from './utils/arrivedPoller.js';
 import { requireAuth } from './middleware/auth.js';
 import pool from './db/pool.js';
@@ -166,7 +166,7 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, () => {
   startArrivedPoller();
-startStewardPoller();
+startJobPollers();
   console.log(`🌳 TreeDegrees API running on port ${PORT}`);
   console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`   Allowed origins: ${allowedOrigins.join(', ')}`);

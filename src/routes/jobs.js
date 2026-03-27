@@ -1,6 +1,7 @@
 // src/routes/jobs.js
 import { Router } from 'express';
 import pool from '../db/pool.js';
+import { notify } from '../utils/notify.js';
 import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
@@ -135,6 +136,8 @@ router.delete('/my', requireAuth, async (req, res) => {
       for (const r of accepted) {
         await client.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [r.fee_seeds, r.requester_id]);
         await client.query(`UPDATE users SET seeds=GREATEST(0,seeds-$1) WHERE id=$3`, [r.fee_seeds, req.user.id]);
+        notify(r.requester_id, 'job_hired', '🔄 Courier refund',
+          `Courier resigned — 🌱${r.fee_seeds} returned to you.`, '/jobs').catch(() => {});
       }
       await client.query(`UPDATE courier_requests SET status='refunded' WHERE courier_id=$1 AND status IN ('pending','accepted')`, [req.user.id]);
     }
@@ -145,6 +148,8 @@ router.delete('/my', requireAuth, async (req, res) => {
       );
       for (const r of pending) {
         await client.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [r.fee_seeds, r.client_id]);
+        notify(r.client_id, 'job_hired', '🔄 Writer refund',
+          `Writer resigned — 🌱${r.fee_seeds} returned to you.`, '/jobs').catch(() => {});
       }
       await client.query(`UPDATE writer_commissions SET status='refunded' WHERE writer_id=$1 AND status IN ('pending','submitted')`, [req.user.id]);
     }
@@ -155,6 +160,8 @@ router.delete('/my', requireAuth, async (req, res) => {
       );
       for (const s of sessions) {
         await client.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [s.escrow_seeds, s.client_id]);
+        notify(s.client_id, 'job_hired', '🔄 Broker refund',
+          `Broker resigned — 🌱${s.escrow_seeds} returned to you.`, '/jobs').catch(() => {});
       }
       await client.query(`UPDATE broker_sessions SET status='recalled', escrow_seeds=0 WHERE broker_id=$1 AND status='active'`, [req.user.id]);
     }
@@ -172,7 +179,11 @@ router.delete('/my', requireAuth, async (req, res) => {
         `SELECT depositor_id, seeds_deposited FROM farmer_plots WHERE farmer_id=$1 AND status='deposited'`, [req.user.id]
       );
       for (const d of deposits) {
-        if (d.depositor_id) await client.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [d.seeds_deposited, d.depositor_id]);
+        if (d.depositor_id) {
+          await client.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [d.seeds_deposited, d.depositor_id]);
+          notify(d.depositor_id, 'job_hired', '🔄 Farmer refund',
+            `Farmer resigned — 🌱${d.seeds_deposited} returned to you.`, '/jobs').catch(() => {});
+        }
       }
       await client.query(`UPDATE farmer_plots SET status='empty', seeds_deposited=0, depositor_id=NULL WHERE farmer_id=$1 AND status='deposited'`, [req.user.id]);
     }
