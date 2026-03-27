@@ -40,7 +40,7 @@ router.patch('/profile', requireAuth, async (req, res) => {
     if (bio && containsProfanity(bio))
       return res.status(400).json({ error: profanityError('Bio') });
 
-    // Location cooldown: 7 days between city/country changes
+    // Location cooldown: 48 hours between city/country changes
     const changingLocation = city !== undefined || country !== undefined;
     if (changingLocation) {
       const { rows: [cur] } = await pool.query(
