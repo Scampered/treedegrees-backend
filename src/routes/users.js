@@ -299,7 +299,9 @@ router.get('/feed', requireAuth, async (req, res) => {
       note: u.daily_note,
       notePostedAt: u.daily_note_updated_at,
       mood: u.daily_mood_updated_at && (Date.now() - new Date(u.daily_mood_updated_at).getTime()) < 86400000 ? u.daily_mood : null,
-      likes: likesMap[u.id] || [],
+      // likes (who reacted) is private — only shown to the note owner via /my-note-likes
+      // Feed only returns reaction count + myReaction so viewer knows what they sent
+      likeCount: (likesMap[u.id] || []).length,
       myReaction: myLikes[u.id] || null,
     })));
   } catch (err) {

@@ -112,19 +112,16 @@ router.post('/', requireAuth, async (req, res) => {
     // Notify recipient when letter arrives (done by arrivedPoller, not here)
     // No notification at send time — only when actually received
 
-    // Use sender's local date so streak day boundaries respect their timezone
-    const senderLocalDate = req.body.senderLocalDate || new Date().toISOString().split('T')[0];
-    const isUser1  = req.user.id === uid1;
+    // Use server UTC date — consistent for all users regardless of timezone
+    const serverDate = new Date().toISOString().split('T')[0];
+    const isUser1 = req.user.id === uid1;
 
-    // Re-evaluate streak from sender's local date perspective
-    const freshStreak = calculateEffectiveStreak(raw, senderLocalDate);
+    const freshStreak = calculateEffectiveStreak(raw, serverDate);
 
-    // Mark sender as "sent today" — fuel is added when the letter ARRIVES, not now
-    // This prevents fuel farming and correctly rewards actual delivery
     await upsertStreak(client, uid1, uid2, {
       streak_days: freshStreak.streak_days,
-      fuel: freshStreak.fuel, // unchanged at send time
-      last_day_processed: senderLocalDate,
+      fuel: freshStreak.fuel,
+      last_day_processed: serverDate,
       user1_sent_today: isUser1 ? true : (freshStreak.user1_sent_today || false),
       user2_sent_today: !isUser1 ? true : (freshStreak.user2_sent_today || false),
     });

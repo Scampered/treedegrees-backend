@@ -185,7 +185,15 @@ router.delete('/my', requireAuth, async (req, res) => {
             `Farmer resigned — 🌱${d.seeds_deposited} returned to you.`, '/jobs').catch(() => {});
         }
       }
-      await client.query(`UPDATE farmer_plots SET status='empty', seeds_deposited=0, depositor_id=NULL WHERE farmer_id=$1 AND status='deposited'`, [req.user.id]);
+      // Refund farmer their plot purchase costs (100 seeds per plot) and delete all plots
+      const { rows: plots } = await client.query(
+        `SELECT COUNT(*) AS cnt FROM farmer_plots WHERE farmer_id=$1`, [req.user.id]
+      );
+      const plotRefund = parseInt(plots[0]?.cnt || 0) * 100;
+      if (plotRefund > 0) {
+        await client.query(`UPDATE users SET seeds=seeds+$1 WHERE id=$2`, [plotRefund, req.user.id]);
+      }
+      await client.query(`DELETE FROM farmer_plots WHERE farmer_id=$1`, [req.user.id]);
     }
 
     // Delete job (ratings are deleted via CASCADE from job_ratings)

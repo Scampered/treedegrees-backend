@@ -116,12 +116,12 @@ router.post('/courier/request', requireAuth, async (req, res) => {
     const speed = COURIER_TIERS[tier].speedMult
     const estHours = Math.max(0.5, 12 / speed)
 
-    const fromLabel = [me.city, me.country].filter(Boolean).join(', ') || 'Unknown'
-    const toLabel   = [courier.city, courier.country].filter(Boolean).join(', ') || 'Unknown'
+    const fromLabel = me.country || 'Unknown'
+    const toLabel   = courier.country || 'Unknown'
     const { recipientId } = req.body
     const recipientLabel = recipientId ? await pool.query(
       `SELECT COALESCE(nickname, split_part(full_name,' ',1)) AS name, city, country FROM users WHERE id=$1`, [recipientId]
-    ).then(r => { const u = r.rows[0]; return u ? `${u.name} (${[u.city,u.country].filter(Boolean).join(', ')})` : 'Unknown' }) : 'Not specified'
+    ).then(r => { const u = r.rows[0]; return u ? `${u.name} (${u.country || 'Unknown'})` : 'Unknown' }) : 'Not specified'
 
     const { rows: [req2] } = await pool.query(
       `INSERT INTO courier_requests (requester_id, courier_id, from_country, to_country, est_hours, fee_seeds, recipient_label)
