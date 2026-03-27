@@ -187,6 +187,56 @@ router.delete('/daily-mood', requireAuth, async (req, res) => {
   }
 });
 
+
+// ── POST /api/users/:id/like-note — like/react to a connection's note ─────────
+router.post('/:id/like-note', requireAuth, async (req, res) => {
+  const { emoji } = req.body
+  const targetId = req.params.id
+  if (targetId === req.user.id) return res.status(400).json({ error: 'Cannot like your own note' })
+  // Validate emoji — must be 1-2 chars (emoji) not plain text
+  const emojiRegex = /^(\p{Emoji}|\p{Emoji_Presentation}){1,2}$/u
+  if (!emoji || !emojiRegex.test(emoji.trim())) {
+    return res.status(400).json({ error: 'Invalid emoji' })
+  }
+  try {
+    await pool.query(
+      `INSERT INTO note_likes (liker_id, target_id, emoji) VALUES ($1,$2,$3)
+       ON CONFLICT (liker_id, target_id) DO UPDATE SET emoji=$3, created_at=NOW()`,
+      [req.user.id, targetId, emoji.trim()]
+    )
+    // Notify target
+    const { rows:[me] } = await pool.query(
+      `SELECT COALESCE(nickname, split_part(full_name,' ',1)) AS name FROM users WHERE id=$1`, [req.user.id]
+    )
+    const { notify } = await import('../utils/notify.js')
+    notify(targetId, 'note_posted', `${emoji} ${me.name} reacted to your note`, '', '/feed').catch(() => {})
+    res.json({ ok: true })
+  } catch(e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
+})
+
+// ── DELETE /api/users/:id/like-note — remove reaction ────────────────────────
+router.delete('/:id/like-note', requireAuth, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM note_likes WHERE liker_id=$1 AND target_id=$2`, [req.user.id, req.params.id])
+    res.json({ ok: true })
+  } catch(e) { res.status(500).json({ error: 'Server error' }) }
+})
+
+// ── GET /api/users/my-note-likes — who liked your current note ────────────────
+router.get('/my-note-likes', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT nl.liker_id, nl.emoji, nl.created_at,
+              COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS liker_name
+       FROM note_likes nl JOIN users u ON u.id=nl.liker_id
+       WHERE nl.target_id=$1
+       ORDER BY nl.created_at DESC`,
+      [req.user.id]
+    )
+    res.json(rows)
+  } catch(e) { res.status(500).json({ error: 'Server error' }) }
+})
+
 // ── GET /api/users/feed ───────────────────────────────────────────────────────
 // FIX: Direct friends (1st degree) can ALWAYS see each other's notes,
 // regardless of is_public. is_public only gates visibility to 2nd/3rd degree.
@@ -215,14 +265,42 @@ router.get('/feed', requireAuth, async (req, res) => {
        ORDER BY GREATEST(u.daily_note_updated_at, u.daily_mood_updated_at) DESC`,
       [req.user.id]
     );
+    // Get reactions for all these users
+    const userIds = rows.map(u => u.id)
+    let likesMap = {}
+    if (userIds.length > 0) {
+      const { rows: likes } = await pool.query(
+        `SELECT nl.target_id, nl.emoji, nl.liker_id,
+                COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS liker_name
+         FROM note_likes nl JOIN users u ON u.id=nl.liker_id
+         WHERE nl.target_id = ANY($1::uuid[])`,
+        [userIds]
+      )
+      for (const l of likes) {
+        if (!likesMap[l.target_id]) likesMap[l.target_id] = []
+        likesMap[l.target_id].push({ emoji: l.emoji, likerName: l.liker_name, likerId: l.liker_id })
+      }
+    }
+    // Get my reaction to each
+    let myLikes = {}
+    if (userIds.length > 0) {
+      const { rows: myR } = await pool.query(
+        `SELECT target_id, emoji FROM note_likes WHERE liker_id=$1 AND target_id=ANY($2::uuid[])`,
+        [req.user.id, userIds]
+      )
+      for (const r of myR) myLikes[r.target_id] = r.emoji
+    }
     res.json(rows.map(u => ({
       id: u.id,
+      userId: u.id,
       displayName: u.display_name,
       city: u.city,
       country: u.country,
       note: u.daily_note,
-      postedAt: u.daily_note_updated_at,
+      notePostedAt: u.daily_note_updated_at,
       mood: u.daily_mood_updated_at && (Date.now() - new Date(u.daily_mood_updated_at).getTime()) < 86400000 ? u.daily_mood : null,
+      likes: likesMap[u.id] || [],
+      myReaction: myLikes[u.id] || null,
     })));
   } catch (err) {
     console.error('Feed error:', err.message);
