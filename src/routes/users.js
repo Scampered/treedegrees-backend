@@ -199,18 +199,30 @@ router.post('/:id/like-note', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'Invalid emoji' })
   }
   try {
+    // Check if this is a NEW reaction (not a change)
+    const { rows: existing } = await pool.query(
+      `SELECT id FROM note_likes WHERE liker_id=$1 AND target_id=$2`, [req.user.id, targetId]
+    )
+    const isNew = existing.length === 0
+
     await pool.query(
       `INSERT INTO note_likes (liker_id, target_id, emoji) VALUES ($1,$2,$3)
-       ON CONFLICT (liker_id, target_id) DO UPDATE SET emoji=$3, created_at=NOW()`,
+       ON CONFLICT (liker_id, target_id) DO UPDATE SET emoji=$3`,
       [req.user.id, targetId, emoji.trim()]
     )
-    // Notify target
     const { rows:[me] } = await pool.query(
       `SELECT COALESCE(nickname, split_part(full_name,' ',1)) AS name FROM users WHERE id=$1`, [req.user.id]
     )
     const { notify } = await import('../utils/notify.js')
-    notify(targetId, 'note_posted', `${emoji} ${me.name} reacted to your note`, '', '/feed').catch(() => {})
-    res.json({ ok: true })
+
+    // Award 5 seeds to note owner only on first-ever reaction from this liker
+    if (isNew) {
+      await awardSeeds(targetId, 5, 'note_reaction')
+      notify(targetId, 'note_posted', `${emoji} ${me.name} reacted to your note (+5 🌱)`, '', '/feed').catch(() => {})
+    } else {
+      notify(targetId, 'note_posted', `${emoji} ${me.name} changed their reaction`, '', '/feed').catch(() => {})
+    }
+    res.json({ ok: true, isNew })
   } catch(e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
 })
 
