@@ -101,9 +101,11 @@ router.patch('/profile', requireAuth, async (req, res) => {
 // ── POST /api/users/daily-note ────────────────────────────────────────────────
 router.post('/daily-note', requireAuth, async (req, res) => {
   try {
-    const { note } = req.body;
+    const { note, emoji } = req.body;
     if (!note || note.trim().length === 0) return res.status(400).json({ error: 'Note cannot be empty' });
     if (note.length > 280) return res.status(400).json({ error: 'Note must be 280 characters or less' });
+    // Validate note emoji if provided
+    const noteEmoji = emoji && emoji.trim() && emoji.trim().length <= 8 ? emoji.trim() : null;
 
     const { rows } = await pool.query('SELECT daily_note_updated_at FROM users WHERE id = $1', [req.user.id]);
     if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
@@ -118,12 +120,17 @@ router.post('/daily-note', requireAuth, async (req, res) => {
     }
 
     const updated = await pool.query(
-      `UPDATE users SET daily_note = $1, daily_note_updated_at = NOW()
-       WHERE id = $2 RETURNING daily_note, daily_note_updated_at`,
-      [note.trim(), req.user.id]
+      `UPDATE users SET daily_note=$1, daily_note_updated_at=NOW(),
+        daily_note_emoji=$2, daily_note_emoji_updated_at=CASE WHEN $2 IS NOT NULL THEN NOW() ELSE daily_note_emoji_updated_at END
+       WHERE id=$3 RETURNING daily_note, daily_note_updated_at, daily_note_emoji`,
+      [note.trim(), noteEmoji, req.user.id]
     );
     await awardSeeds(req.user.id, 20, 'daily_note');
-    res.json({ dailyNote: updated.rows[0].daily_note, dailyNoteUpdatedAt: updated.rows[0].daily_note_updated_at });
+    res.json({
+      dailyNote: updated.rows[0].daily_note,
+      dailyNoteUpdatedAt: updated.rows[0].daily_note_updated_at,
+      noteEmoji: updated.rows[0].daily_note_emoji,
+    });
   } catch (err) {
     console.error('Daily note error:', err.message);
     res.status(500).json({ error: 'Server error' });
@@ -133,12 +140,12 @@ router.post('/daily-note', requireAuth, async (req, res) => {
 
 // ── POST /api/users/daily-mood ────────────────────────────────────────────────
 router.post('/daily-mood', requireAuth, async (req, res) => {
-  const VALID_MOODS = ['😄','😢','😡','😴','🤔','🥹'];
   const COOLDOWN_MS = 4 * 3600 * 1000; // 4 hours
   try {
     const { mood } = req.body;
-    if (!mood) return res.status(400).json({ error: 'Mood required' });
-    if (!VALID_MOODS.includes(mood)) return res.status(400).json({ error: 'Invalid mood' });
+    if (!mood || typeof mood !== 'string') return res.status(400).json({ error: 'Mood required' });
+    const trimmed = mood.trim();
+    if (!trimmed || trimmed.length > 8) return res.status(400).json({ error: 'Invalid mood' });
 
     const { rows } = await pool.query(
       'SELECT daily_mood, daily_mood_updated_at FROM users WHERE id = $1', [req.user.id]
@@ -161,10 +168,9 @@ router.post('/daily-mood', requireAuth, async (req, res) => {
     const { rows: [updated] } = await pool.query(
       `UPDATE users SET daily_mood = $1, daily_mood_updated_at = NOW()
        WHERE id = $2 RETURNING daily_mood, daily_mood_updated_at`,
-      [mood, req.user.id]
+      [trimmed, req.user.id]
     );
 
-    // Only award seeds once per 4h window (first set, not spam)
     await awardSeeds(req.user.id, 10, 'set_mood');
 
     res.json({ mood: updated.daily_mood, moodUpdatedAt: updated.daily_mood_updated_at });
@@ -261,7 +267,7 @@ router.get('/feed', requireAuth, async (req, res) => {
         u.id,
         COALESCE(u.nickname, split_part(u.full_name, ' ', 1)) AS display_name,
         u.city, u.country,
-        u.daily_note, u.daily_note_updated_at,
+        u.daily_note, u.daily_note_updated_at, u.daily_note_emoji,
         u.daily_mood, u.daily_mood_updated_at
        FROM friendships f
        JOIN users u ON (
@@ -310,6 +316,7 @@ router.get('/feed', requireAuth, async (req, res) => {
       country: u.country,
       note: u.daily_note,
       notePostedAt: u.daily_note_updated_at,
+      noteEmoji: u.daily_note_emoji,
       mood: u.daily_mood_updated_at && (Date.now() - new Date(u.daily_mood_updated_at).getTime()) < 86400000 ? u.daily_mood : null,
       // likes (who reacted) is private — only shown to the note owner via /my-note-likes
       // Feed only returns reaction count + myReaction so viewer knows what they sent
