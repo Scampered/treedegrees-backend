@@ -121,9 +121,9 @@ router.post('/daily-note', requireAuth, async (req, res) => {
 
     const updated = await pool.query(
       `UPDATE users SET daily_note=$1, daily_note_updated_at=NOW(),
-        daily_note_emoji=$2, daily_note_emoji_updated_at=CASE WHEN $2 IS NOT NULL THEN NOW() ELSE daily_note_emoji_updated_at END
+        daily_note_emoji=$2::text, daily_note_emoji_updated_at=CASE WHEN $2::text IS NOT NULL THEN NOW() ELSE daily_note_emoji_updated_at END
        WHERE id=$3 RETURNING daily_note, daily_note_updated_at, daily_note_emoji`,
-      [note.trim(), noteEmoji, req.user.id]
+      [note.trim(), noteEmoji || null, req.user.id]
     );
     await awardSeeds(req.user.id, 20, 'daily_note');
     res.json({
