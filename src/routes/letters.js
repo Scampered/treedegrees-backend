@@ -296,6 +296,7 @@ router.get('/streaks', requireAuth, async (req, res) => {
     } finally {
       client.release();
     }
+    res.setHeader('Cache-Control', 'private, max-age=30')
     res.json(results);
   } catch (err) {
     console.error('Streaks error:', err.message);
