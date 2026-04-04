@@ -1,4 +1,5 @@
 import { awardSeeds } from './grove.js';
+import { notifyConnectionsOfNote } from '../utils/noteNotify.js';
 // src/routes/users.js
 import { Router } from 'express';
 import pool from '../db/pool.js';
@@ -126,6 +127,7 @@ router.post('/daily-note', requireAuth, async (req, res) => {
       [note.trim(), noteEmoji || null, req.user.id]
     );
     await awardSeeds(req.user.id, 20, 'daily_note');
+    notifyConnectionsOfNote(req.user.id, note.trim(), noteEmoji).catch(()=>{});
     res.json({
       dailyNote: updated.rows[0].daily_note,
       dailyNoteUpdatedAt: updated.rows[0].daily_note_updated_at,

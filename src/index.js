@@ -12,16 +12,6 @@ import usersRoutes from './routes/users.js';
 import nicknamesRoutes from './routes/nicknames.js';
 import lettersRoutes from './routes/letters.js';
 import adminRoutes from './routes/admin.js';
-import groupsRoutes from './routes/groups.js';
-import gamesRoutes from './routes/games.js';
-import groveRoutes from './routes/grove.js';
-import marketRoutes from './routes/market.js';
-import pushRoutes from './routes/push.js';
-import jobsRoutes from './routes/jobs.js';
-import notificationsRoutes from './routes/notifications.js';
-import jobActionsRoutes from './routes/jobActions.js';
-import { startJobPollers } from './utils/jobPollers.js';
-import { startArrivedPoller } from './utils/arrivedPoller.js';
 import { requireAuth } from './middleware/auth.js';
 import pool from './db/pool.js';
 import { verifyToken } from './utils/auth.js';
@@ -146,14 +136,6 @@ app.use('/api/users',     apiLimiter,  usersRoutes);
 app.use('/api/nicknames', apiLimiter,  nicknamesRoutes);
 app.use('/api/letters',   apiLimiter,  lettersRoutes);
 app.use('/api/admin',     apiLimiter,  adminRoutes);
-app.use('/api/groups',    apiLimiter,  groupsRoutes);
-app.use('/api/games',     apiLimiter,  gamesRoutes);
-app.use('/api/market',    apiLimiter,  marketRoutes);
-app.use('/api/push',      apiLimiter,  pushRoutes);
-app.use('/api/jobs',      apiLimiter,  jobsRoutes);
-app.use('/api/notifications', apiLimiter, notificationsRoutes);
-app.use('/api/job-actions', apiLimiter, jobActionsRoutes);
-app.use('/api/grove',     apiLimiter,  groveRoutes);
 
 // ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
@@ -165,8 +147,6 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  startArrivedPoller();
-startJobPollers();
   console.log(`🌳 TreeDegrees API running on port ${PORT}`);
   console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`   Allowed origins: ${allowedOrigins.join(', ')}`);
