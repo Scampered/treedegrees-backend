@@ -1,5 +1,6 @@
 // src/routes/moments.js — Cloudflare R2 photo moments
 import { Router } from 'express';
+import { getRoute } from '../utils/routeFetcher.js';
 import pool from '../db/pool.js';
 import { requireAuth } from '../middleware/auth.js';
 import { notify } from '../utils/notify.js';
@@ -165,6 +166,13 @@ router.post('/:id/like', requireAuth, async (req, res) => {
     const { rows:[{count}] } = await pool.query(
       `SELECT COUNT(*) FROM moment_likes WHERE moment_id=$1`, [req.params.id]
     )
+    // Notify uploader
+    if (m.uploader_id !== req.user.id) {
+      const { rows:[liker] } = await pool.query(
+        `SELECT COALESCE(nickname,split_part(full_name,' ',1)) AS name FROM users WHERE id=$1`, [req.user.id]
+      )
+      notify(m.uploader_id, 'note_posted', `❤️ ${liker?.name} liked your memory`, '', '/my-world').catch(()=>{})
+    }
     res.json({ ok:true, likeCount: parseInt(count) })
   } catch(e) { res.status(500).json({ error:'Server error' }) }
 })
@@ -184,25 +192,55 @@ router.get('/:id/comments', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error:'Server error' }) }
 })
 
-// POST /api/moments/:id/comment
+// POST /api/moments/:id/comment — 1 per person (delete first to recomment)
 router.post('/:id/comment', requireAuth, async (req, res) => {
   const { text } = req.body
-  if (!text?.trim() || text.length > 120) return res.status(400).json({ error:'Invalid comment' })
+  if (!text?.trim() || text.length > 120) return res.status(400).json({ error:'Max 120 chars' })
   try {
     const { rows:[m] } = await pool.query(
       `SELECT uploader_id FROM moments WHERE id=$1 AND expires_at>NOW()`, [req.params.id]
     )
     if (!m) return res.status(404).json({ error:'Not found' })
+    // Check if user already commented
+    const { rows:[existing] } = await pool.query(
+      `SELECT id FROM moment_comments WHERE moment_id=$1 AND user_id=$2`, [req.params.id, req.user.id]
+    )
+    if (existing) return res.status(409).json({ error:'Already commented. Delete your comment first to post a new one.' })
     const { rows:[comment] } = await pool.query(
-      `INSERT INTO moment_comments(moment_id,user_id,text) VALUES($1,$2,$3)
-       RETURNING id, text, created_at`,
+      `INSERT INTO moment_comments(moment_id,user_id,text) VALUES($1,$2,$3) RETURNING id,text,created_at`,
       [req.params.id, req.user.id, text.trim()]
     )
     const { rows:[u] } = await pool.query(
       `SELECT COALESCE(nickname,split_part(full_name,' ',1)) AS name FROM users WHERE id=$1`, [req.user.id]
     )
+    // Notify uploader
+    if (m.uploader_id !== req.user.id) {
+      notify(m.uploader_id, 'note_posted', `📝 ${u.name} left a sticky note`,
+        text.trim().slice(0,60), '/my-world').catch(()=>{})
+    }
     res.status(201).json({ id:comment.id, text:comment.text, authorName:u.name, userId:req.user.id, createdAt:comment.created_at })
   } catch(e) { res.status(500).json({ error:'Server error' }) }
+})
+
+// DELETE /api/moments/:id/comment — delete own comment
+router.delete('/:id/comment', requireAuth, async (req, res) => {
+  try {
+    const { rows:[c] } = await pool.query(
+      `DELETE FROM moment_comments WHERE moment_id=$1 AND user_id=$2 RETURNING id`, [req.params.id, req.user.id]
+    )
+    if (!c) return res.status(404).json({ error:'No comment to delete' })
+    res.json({ ok:true })
+  } catch(e) { res.status(500).json({ error:'Server error' }) }
+})
+
+// GET /api/moments/route — get route between two points for watermark
+router.get('/route', requireAuth, async (req, res) => {
+  const { lat1, lon1, lat2, lon2 } = req.query
+  if (!lat1||!lon1||!lat2||!lon2) return res.status(400).json({ error:'Need lat1,lon1,lat2,lon2' })
+  try {
+    const route = await getRoute(parseFloat(lat1), parseFloat(lon1), parseFloat(lat2), parseFloat(lon2))
+    res.json(route)
+  } catch(e) { res.status(500).json({ error:'Route failed' }) }
 })
 
 export default router;
