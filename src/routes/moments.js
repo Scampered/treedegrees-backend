@@ -28,6 +28,13 @@ router.post('/', requireAuth, async (req, res) => {
   if (!['image/jpeg','image/png','image/webp'].includes(mimeType))
     return res.status(400).json({ error: 'Only JPEG, PNG, WebP allowed' });
 
+  // Anti-spam: max 1 upload per 10 minutes per user
+  const { rows:[recentUpload] } = await pool.query(
+    `SELECT id FROM moments WHERE uploader_id=$1 AND created_at > NOW()-INTERVAL '10 minutes' LIMIT 1`,
+    [req.user.id]
+  );
+  if (recentUpload) return res.status(429).json({ error: 'Please wait a few minutes before posting again.' });
+
   // Decode base64
   const buffer = Buffer.from(imageBase64, 'base64');
   if (buffer.length > 5 * 1024 * 1024) // 5MB max (already compressed client-side)
@@ -189,8 +196,28 @@ router.post('/:id/like', requireAuth, async (req, res) => {
 })
 
 // GET /api/moments/:id/comments
+// Visibility rules:
+// - Uploader sees ALL comments
+// - Commenter sees their OWN comment + comments from their connections
+// - Others see only comments from their mutual connections
 router.get('/:id/comments', requireAuth, async (req, res) => {
   try {
+    const { rows:[moment] } = await pool.query(
+      `SELECT uploader_id FROM moments WHERE id=$1`, [req.params.id]
+    )
+    if (!moment) return res.status(404).json({ error:'Not found' })
+
+    const isUploader = moment.uploader_id === req.user.id
+
+    // Get viewer's connection IDs
+    const { rows: myConns } = await pool.query(
+      `SELECT CASE WHEN user_id_1=$1 THEN user_id_2 ELSE user_id_1 END AS friend_id
+       FROM friendships WHERE (user_id_1=$1 OR user_id_2=$1) AND status='accepted'`,
+      [req.user.id]
+    )
+    const myConnIds = new Set(myConns.map(r => r.friend_id))
+    myConnIds.add(req.user.id) // always include self
+
     const { rows } = await pool.query(
       `SELECT mc.id, mc.text, mc.created_at,
               COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS author_name,
@@ -199,7 +226,13 @@ router.get('/:id/comments', requireAuth, async (req, res) => {
        WHERE mc.moment_id=$1 ORDER BY mc.created_at ASC`,
       [req.params.id]
     )
-    res.json(rows.map(r => ({ id:r.id, text:r.text, authorName:r.author_name, userId:r.user_id, createdAt:r.created_at })))
+
+    // Filter: uploader sees all; others see own + comments from their connections
+    const visible = isUploader
+      ? rows
+      : rows.filter(r => myConnIds.has(r.user_id))
+
+    res.json(visible.map(r => ({ id:r.id, text:r.text, authorName:r.author_name, userId:r.user_id, createdAt:r.created_at })))
   } catch(e) { res.status(500).json({ error:'Server error' }) }
 })
 
