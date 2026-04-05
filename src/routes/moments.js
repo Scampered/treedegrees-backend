@@ -243,4 +243,63 @@ router.get('/route', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error:'Route failed' }) }
 })
 
+
+// GET /api/moments/connections — all connections' recent moments (for feed)
+router.get('/connections', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT m.id, m.cdn_url, m.caption, m.note_emoji, m.expires_at, m.created_at,
+              m.uploader_id,
+              COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS uploader_name,
+              (SELECT COUNT(*) FROM moment_likes WHERE moment_id=m.id) AS like_count,
+              (SELECT COUNT(*) FROM moment_comments WHERE moment_id=m.id) AS comment_count,
+              EXISTS(
+                SELECT 1 FROM moment_tags mt WHERE mt.moment_id=m.id AND mt.user_id=$1
+              ) AS is_tagged
+       FROM moments m
+       JOIN users u ON u.id=m.uploader_id
+       WHERE m.expires_at > NOW()
+         AND m.uploader_id IN (
+           SELECT CASE WHEN user_id_1=$1 THEN user_id_2 ELSE user_id_1 END
+           FROM friendships WHERE (user_id_1=$1 OR user_id_2=$1) AND status='accepted'
+         )
+       ORDER BY m.created_at DESC
+       LIMIT 40`,
+      [req.user.id]
+    )
+    res.json(rows)
+  } catch(e) { console.error(e.message); res.status(500).json({ error:'Server error' }) }
+})
+
+// GET /api/moments/by/:userId — get a specific user's public moments (must be connection)
+router.get('/by/:userId', requireAuth, async (req, res) => {
+  const targetId = req.params.userId
+  try {
+    // Must be a direct connection
+    const [u1,u2] = [req.user.id, targetId].sort()
+    const { rows:[f] } = await pool.query(
+      `SELECT id FROM friendships WHERE user_id_1=$1 AND user_id_2=$2 AND status='accepted'`,
+      [u1,u2]
+    )
+    if (!f && targetId !== req.user.id)
+      return res.status(403).json({ error:'Only connections can view posts' })
+
+    const { rows } = await pool.query(
+      `SELECT m.id, m.cdn_url, m.caption, m.note_emoji, m.expires_at, m.created_at,
+              m.uploader_id,
+              (SELECT COUNT(*) FROM moment_likes WHERE moment_id=m.id) AS like_count,
+              (SELECT COUNT(*) FROM moment_comments WHERE moment_id=m.id) AS comment_count,
+              EXISTS(
+                SELECT 1 FROM moment_tags mt WHERE mt.moment_id=m.id AND mt.user_id=$2
+              ) AS is_tagged
+       FROM moments m
+       WHERE m.uploader_id=$1 AND m.expires_at > NOW()
+       ORDER BY m.created_at DESC
+       LIMIT 6`,
+      [targetId, req.user.id]
+    )
+    res.json(rows)
+  } catch(e) { console.error(e.message); res.status(500).json({ error:'Server error' }) }
+})
+
 export default router;
