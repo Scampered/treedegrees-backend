@@ -63,8 +63,13 @@ router.post('/', requireAuth, async (req, res) => {
       [req.user.id, r2Key, cdnUrl, (caption||'').slice(0,200), emoji||null]
     );
 
-    // Award seeds for posting (max 1/day = 50 seeds)
-    if (awardPostSeeds) {
+    // Award 50 seeds once per calendar day — checked AFTER successful insert
+    const { rows:[todayPost] } = await pool.query(
+      `SELECT id FROM moments WHERE uploader_id=$1 AND id!=$2
+       AND created_at::date=CURRENT_DATE LIMIT 1`,
+      [req.user.id, moment.id]
+    )
+    if (!todayPost) {
       await pool.query(`UPDATE users SET seeds=COALESCE(seeds,0)+50 WHERE id=$1`, [req.user.id])
       notify(req.user.id, 'seeds_earned', '🌱 +50 seeds', 'Seeds for posting a memory today!', '/grove').catch(()=>{})
     }
@@ -155,19 +160,30 @@ router.get('/tagged', requireAuth, async (req, res) => {
 router.delete('/:id', requireAuth, async (req, res) => {
   try {
     const { rows:[m] } = await pool.query(
-      `SELECT r2_key FROM moments WHERE id=$1 AND uploader_id=$2`,
+      `SELECT r2_key, created_at FROM moments WHERE id=$1 AND uploader_id=$2`,
       [req.params.id, req.user.id]
-    );
-    if (!m) return res.status(404).json({ error:'Not found' });
+    )
+    if (!m) return res.status(404).json({ error:'Not found' })
     // Delete from R2
     try {
-      const r2 = getR2();
-      await r2.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET_NAME, Key: m.r2_key }));
-    } catch(e) { console.warn('[moments] R2 delete failed:', e.message); }
-    await pool.query(`DELETE FROM moments WHERE id=$1`, [req.params.id]);
-    res.json({ ok:true });
-  } catch(e) { res.status(500).json({ error:'Server error' }); }
-});
+      const r2 = getR2()
+      await r2.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET_NAME, Key: m.r2_key }))
+    } catch(e) { console.warn('[moments] R2 delete failed:', e.message) }
+    await pool.query(`DELETE FROM moments WHERE id=$1`, [req.params.id])
+    // Deduct 50 seeds if this was posted today and no other post today exists
+    const createdToday = new Date(m.created_at).toDateString() === new Date().toDateString()
+    if (createdToday) {
+      const { rows:[otherToday] } = await pool.query(
+        `SELECT id FROM moments WHERE uploader_id=$1 AND created_at::date=CURRENT_DATE LIMIT 1`,
+        [req.user.id]
+      )
+      if (!otherToday) {
+        await pool.query(`UPDATE users SET seeds=GREATEST(0,COALESCE(seeds,0)-50) WHERE id=$1`, [req.user.id])
+      }
+    }
+    res.json({ ok:true })
+  } catch(e) { res.status(500).json({ error:'Server error' }) }
+})
 
 
 // POST /api/moments/:id/like
