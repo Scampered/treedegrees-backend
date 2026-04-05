@@ -56,6 +56,12 @@ router.post('/', requireAuth, async (req, res) => {
       [req.user.id, r2Key, cdnUrl, (caption||'').slice(0,200), emoji||null]
     );
 
+    // Award seeds for posting (max 1/day = 50 seeds)
+    if (awardPostSeeds) {
+      await pool.query(`UPDATE users SET seeds=COALESCE(seeds,0)+50 WHERE id=$1`, [req.user.id])
+      notify(req.user.id, 'seeds_earned', '🌱 +50 seeds', 'Seeds for posting a memory today!', '/grove').catch(()=>{})
+    }
+
     // Tag connections
     const validTagIds = [];
     for (const tagId of tagIds.slice(0,5)) {
@@ -102,18 +108,23 @@ router.get('/mine', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT m.id, m.cdn_url, m.caption, m.note_emoji, m.expires_at, m.created_at,
-              ARRAY_AGG(DISTINCT COALESCE(u.nickname,split_part(u.full_name,' ',1))) 
-                FILTER(WHERE u.id IS NOT NULL) AS tagged_names
+              ARRAY_AGG(DISTINCT COALESCE(ut.nickname,split_part(ut.full_name,' ',1)))
+                FILTER(WHERE ut.id IS NOT NULL) AS tagged_names,
+              (SELECT COUNT(*)::int FROM moment_likes WHERE moment_id=m.id) AS like_count,
+              (SELECT COUNT(*)::int FROM moment_comments WHERE moment_id=m.id) AS comment_count,
+              (SELECT JSON_AGG(JSON_BUILD_OBJECT('name', COALESCE(ul.nickname,split_part(ul.full_name,' ',1))))
+               FROM moment_likes ml JOIN users ul ON ul.id=ml.user_id
+               WHERE ml.moment_id=m.id) AS liked_by
        FROM moments m
        LEFT JOIN moment_tags mt ON mt.moment_id=m.id
-       LEFT JOIN users u ON u.id=mt.user_id
+       LEFT JOIN users ut ON ut.id=mt.user_id
        WHERE m.uploader_id=$1 AND m.expires_at > NOW()
        GROUP BY m.id ORDER BY m.created_at DESC`,
       [req.user.id]
-    );
-    res.json(rows);
-  } catch(e) { res.status(500).json({ error:'Server error' }); }
-});
+    )
+    res.json(rows)
+  } catch(e) { res.status(500).json({ error:'Server error' }) }
+})
 
 // GET /api/moments/tagged — moments I'm tagged in
 router.get('/tagged', requireAuth, async (req, res) => {
@@ -173,7 +184,7 @@ router.post('/:id/like', requireAuth, async (req, res) => {
       )
       notify(m.uploader_id, 'note_posted', `❤️ ${liker?.name} liked your memory`, '', '/my-world').catch(()=>{})
     }
-    res.json({ ok:true, likeCount: parseInt(count) })
+    res.json({ ok:true, likeCount: parseInt(count, 10) })
   } catch(e) { res.status(500).json({ error:'Server error' }) }
 })
 
@@ -213,10 +224,11 @@ router.post('/:id/comment', requireAuth, async (req, res) => {
     const { rows:[u] } = await pool.query(
       `SELECT COALESCE(nickname,split_part(full_name,' ',1)) AS name FROM users WHERE id=$1`, [req.user.id]
     )
-    // Notify uploader
+    // Notify uploader + award seeds for comment
     if (m.uploader_id !== req.user.id) {
-      notify(m.uploader_id, 'note_posted', `📝 ${u.name} left a sticky note`,
-        text.trim().slice(0,60), '/my-world').catch(()=>{})
+      await pool.query(`UPDATE users SET seeds=COALESCE(seeds,0)+10 WHERE id=$1`, [m.uploader_id])
+      notify(m.uploader_id, 'note_posted', `📝 ${u.name} left a note on your memory`,
+        `+10 🌱 · "${text.trim().slice(0,40)}"`, '/my-world').catch(()=>{})
     }
     res.status(201).json({ id:comment.id, text:comment.text, authorName:u.name, userId:req.user.id, createdAt:comment.created_at })
   } catch(e) { res.status(500).json({ error:'Server error' }) }
