@@ -150,4 +150,59 @@ router.delete('/:id', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error:'Server error' }); }
 });
 
+
+// POST /api/moments/:id/like
+router.post('/:id/like', requireAuth, async (req, res) => {
+  try {
+    const { rows:[m] } = await pool.query(
+      `SELECT uploader_id FROM moments WHERE id=$1 AND expires_at>NOW()`, [req.params.id]
+    )
+    if (!m) return res.status(404).json({ error:'Not found' })
+    await pool.query(
+      `INSERT INTO moment_likes(moment_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING`,
+      [req.params.id, req.user.id]
+    )
+    const { rows:[{count}] } = await pool.query(
+      `SELECT COUNT(*) FROM moment_likes WHERE moment_id=$1`, [req.params.id]
+    )
+    res.json({ ok:true, likeCount: parseInt(count) })
+  } catch(e) { res.status(500).json({ error:'Server error' }) }
+})
+
+// GET /api/moments/:id/comments
+router.get('/:id/comments', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT mc.id, mc.text, mc.created_at,
+              COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS author_name,
+              u.id AS user_id
+       FROM moment_comments mc JOIN users u ON u.id=mc.user_id
+       WHERE mc.moment_id=$1 ORDER BY mc.created_at ASC`,
+      [req.params.id]
+    )
+    res.json(rows.map(r => ({ id:r.id, text:r.text, authorName:r.author_name, userId:r.user_id, createdAt:r.created_at })))
+  } catch(e) { res.status(500).json({ error:'Server error' }) }
+})
+
+// POST /api/moments/:id/comment
+router.post('/:id/comment', requireAuth, async (req, res) => {
+  const { text } = req.body
+  if (!text?.trim() || text.length > 120) return res.status(400).json({ error:'Invalid comment' })
+  try {
+    const { rows:[m] } = await pool.query(
+      `SELECT uploader_id FROM moments WHERE id=$1 AND expires_at>NOW()`, [req.params.id]
+    )
+    if (!m) return res.status(404).json({ error:'Not found' })
+    const { rows:[comment] } = await pool.query(
+      `INSERT INTO moment_comments(moment_id,user_id,text) VALUES($1,$2,$3)
+       RETURNING id, text, created_at`,
+      [req.params.id, req.user.id, text.trim()]
+    )
+    const { rows:[u] } = await pool.query(
+      `SELECT COALESCE(nickname,split_part(full_name,' ',1)) AS name FROM users WHERE id=$1`, [req.user.id]
+    )
+    res.status(201).json({ id:comment.id, text:comment.text, authorName:u.name, userId:req.user.id, createdAt:comment.created_at })
+  } catch(e) { res.status(500).json({ error:'Server error' }) }
+})
+
 export default router;
