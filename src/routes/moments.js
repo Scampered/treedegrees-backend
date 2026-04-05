@@ -28,12 +28,12 @@ router.post('/', requireAuth, async (req, res) => {
   if (!['image/jpeg','image/png','image/webp'].includes(mimeType))
     return res.status(400).json({ error: 'Only JPEG, PNG, WebP allowed' });
 
-  // Anti-spam: max 1 upload per 10 minutes per user
-  const { rows:[recentUpload] } = await pool.query(
-    `SELECT id FROM moments WHERE uploader_id=$1 AND created_at > NOW()-INTERVAL '10 minutes' LIMIT 1`,
+  // 1 post per calendar day (server timezone = UTC)
+  const { rows:[todayCheck] } = await pool.query(
+    `SELECT id FROM moments WHERE uploader_id=$1 AND created_at::date=CURRENT_DATE LIMIT 1`,
     [req.user.id]
-  );
-  if (recentUpload) return res.status(429).json({ error: 'Please wait a few minutes before posting again.' });
+  )
+  if (todayCheck) return res.status(429).json({ error: 'You have already posted a memory today. Come back tomorrow!' })
 
   // Decode base64
   const buffer = Buffer.from(imageBase64, 'base64');
@@ -63,16 +63,9 @@ router.post('/', requireAuth, async (req, res) => {
       [req.user.id, r2Key, cdnUrl, (caption||'').slice(0,200), emoji||null]
     );
 
-    // Award 50 seeds once per calendar day — checked AFTER successful insert
-    const { rows:[todayPost] } = await pool.query(
-      `SELECT id FROM moments WHERE uploader_id=$1 AND id!=$2
-       AND created_at::date=CURRENT_DATE LIMIT 1`,
-      [req.user.id, moment.id]
-    )
-    if (!todayPost) {
-      await pool.query(`UPDATE users SET seeds=COALESCE(seeds,0)+50 WHERE id=$1`, [req.user.id])
-      notify(req.user.id, 'seeds_earned', '🌱 +50 seeds', 'Seeds for posting a memory today!', '/grove').catch(()=>{})
-    }
+    // Award 50 seeds — we already confirmed above this is first post today
+    await pool.query(`UPDATE users SET seeds=COALESCE(seeds,0)+50 WHERE id=$1`, [req.user.id])
+    notify(req.user.id, 'seeds_earned', '\u{1F331} +50 seeds', 'Seeds for posting a memory today!', '/grove').catch(()=>{})
 
     // Tag connections
     const validTagIds = [];
