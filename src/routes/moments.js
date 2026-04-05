@@ -263,11 +263,10 @@ router.get('/connections', requireAuth, async (req, res) => {
       `SELECT m.id, m.cdn_url, m.caption, m.note_emoji, m.expires_at, m.created_at,
               m.uploader_id,
               COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS uploader_name,
-              (SELECT COUNT(*) FROM moment_likes WHERE moment_id=m.id) AS like_count,
-              (SELECT COUNT(*) FROM moment_comments WHERE moment_id=m.id) AS comment_count,
-              EXISTS(
-                SELECT 1 FROM moment_tags mt WHERE mt.moment_id=m.id AND mt.user_id=$1
-              ) AS is_tagged
+              (SELECT COUNT(*) FROM moment_likes WHERE moment_id=m.id)::int AS like_count,
+              (SELECT COUNT(*) FROM moment_comments WHERE moment_id=m.id)::int AS comment_count,
+              EXISTS(SELECT 1 FROM moment_tags mt WHERE mt.moment_id=m.id AND mt.user_id=$1) AS is_tagged,
+              EXISTS(SELECT 1 FROM moment_likes ml WHERE ml.moment_id=m.id AND ml.user_id=$1) AS has_liked
        FROM moments m
        JOIN users u ON u.id=m.uploader_id
        WHERE m.expires_at > NOW()
@@ -299,11 +298,10 @@ router.get('/by/:userId', requireAuth, async (req, res) => {
     const { rows } = await pool.query(
       `SELECT m.id, m.cdn_url, m.caption, m.note_emoji, m.expires_at, m.created_at,
               m.uploader_id,
-              (SELECT COUNT(*) FROM moment_likes WHERE moment_id=m.id) AS like_count,
-              (SELECT COUNT(*) FROM moment_comments WHERE moment_id=m.id) AS comment_count,
-              EXISTS(
-                SELECT 1 FROM moment_tags mt WHERE mt.moment_id=m.id AND mt.user_id=$2
-              ) AS is_tagged
+              (SELECT COUNT(*) FROM moment_likes WHERE moment_id=m.id)::int AS like_count,
+              (SELECT COUNT(*) FROM moment_comments WHERE moment_id=m.id)::int AS comment_count,
+              EXISTS(SELECT 1 FROM moment_tags mt WHERE mt.moment_id=m.id AND mt.user_id=$2) AS is_tagged,
+              EXISTS(SELECT 1 FROM moment_likes ml WHERE ml.moment_id=m.id AND ml.user_id=$2) AS has_liked
        FROM moments m
        WHERE m.uploader_id=$1 AND m.expires_at > NOW()
        ORDER BY m.created_at DESC
