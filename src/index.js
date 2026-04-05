@@ -16,17 +16,6 @@ import { requireAuth } from './middleware/auth.js';
 import pool from './db/pool.js';
 import { verifyToken } from './utils/auth.js';
 
-import groveRoutes      from './routes/grove.js';
-import jobsRoutes       from './routes/jobs.js';
-import jobActionsRoutes from './routes/jobActions.js';
-import groupsRoutes     from './routes/groups.js';
-import notificationsRoutes from './routes/notifications.js';
-import marketRoutes     from './routes/market.js';
-import profileRoutes    from './routes/profile.js';
-import momentsRoutes    from './routes/moments.js';
-import { startArrivedPoller } from './utils/arrivedPoller.js';
-import { startJobPollers }    from './utils/jobPollers.js';
-
 dotenv.config();
 
 const app = express();
@@ -63,16 +52,8 @@ const apiLimiter = rateLimit({
   message: { error: 'Rate limit exceeded' },
 });
 
-app.use(express.json({ limit: '16kb' }));
-
-app.use('/api/grove',          apiLimiter, groveRoutes);
-app.use('/api/jobs',           apiLimiter, jobsRoutes);
-app.use('/api/job-actions',    apiLimiter, jobActionsRoutes);
-app.use('/api/groups',         apiLimiter, groupsRoutes);
-app.use('/api/notifications',  apiLimiter, notificationsRoutes);
-app.use('/api/market',         apiLimiter, marketRoutes);
-app.use('/api/profile',        apiLimiter, profileRoutes);
-app.use('/api/moments',        apiLimiter, momentsRoutes);
+app.use(express.json({ limit: '12mb' }));
+app.use(express.urlencoded({ extended: true, limit: '12mb' }));
 
 // ── User popups — authenticated, returns unseen messages ─────────────────────
 app.get('/api/popups', apiLimiter, async (req, res) => {
@@ -171,6 +152,3 @@ app.listen(PORT, () => {
   console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`   Allowed origins: ${allowedOrigins.join(', ')}`);
 });
-
-startArrivedPoller();
-startJobPollers();
