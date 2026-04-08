@@ -102,7 +102,7 @@ router.patch('/profile', requireAuth, async (req, res) => {
 // ── POST /api/users/daily-note ────────────────────────────────────────────────
 router.post('/daily-note', requireAuth, async (req, res) => {
   try {
-    const { note, emoji } = req.body;
+    const { note, emoji, momentId, momentCdnUrl } = req.body;
     if (!note || note.trim().length === 0) return res.status(400).json({ error: 'Note cannot be empty' });
     if (note.length > 280) return res.status(400).json({ error: 'Note must be 280 characters or less' });
     // Validate note emoji if provided
@@ -122,9 +122,10 @@ router.post('/daily-note', requireAuth, async (req, res) => {
 
     const updated = await pool.query(
       `UPDATE users SET daily_note=$1, daily_note_updated_at=NOW(),
-        daily_note_emoji=$2::text, daily_note_emoji_updated_at=CASE WHEN $2::text IS NOT NULL THEN NOW() ELSE daily_note_emoji_updated_at END
-       WHERE id=$3 RETURNING daily_note, daily_note_updated_at, daily_note_emoji`,
-      [note.trim(), noteEmoji || null, req.user.id]
+        daily_note_emoji=$2::text, daily_note_emoji_updated_at=CASE WHEN $2::text IS NOT NULL THEN NOW() ELSE daily_note_emoji_updated_at END,
+        note_moment_id=$4::uuid, note_moment_cdn_url=$5
+       WHERE id=$3 RETURNING daily_note, daily_note_updated_at, daily_note_emoji, note_moment_cdn_url`,
+      [note.trim(), noteEmoji || null, req.user.id, momentId || null, momentCdnUrl || null]
     );
     await awardSeeds(req.user.id, 20, 'daily_note');
     notifyConnectionsOfNote(req.user.id, note.trim(), noteEmoji).catch(()=>{});
@@ -132,6 +133,7 @@ router.post('/daily-note', requireAuth, async (req, res) => {
       dailyNote: updated.rows[0].daily_note,
       dailyNoteUpdatedAt: updated.rows[0].daily_note_updated_at,
       noteEmoji: updated.rows[0].daily_note_emoji,
+      noteMomentCdnUrl: updated.rows[0].note_moment_cdn_url || null,
     });
   } catch (err) {
     console.error('Daily note error:', err.message);
@@ -270,6 +272,7 @@ router.get('/feed', requireAuth, async (req, res) => {
         COALESCE(u.nickname, split_part(u.full_name, ' ', 1)) AS display_name,
         u.city, u.country,
         u.daily_note, u.daily_note_updated_at, u.daily_note_emoji,
+        u.note_moment_cdn_url,
         u.daily_mood, u.daily_mood_updated_at
        FROM friendships f
        JOIN users u ON (
@@ -324,6 +327,7 @@ router.get('/feed', requireAuth, async (req, res) => {
       // Feed only returns reaction count + myReaction so viewer knows what they sent
       likeCount: (likesMap[u.id] || []).length,
       myReaction: myLikes[u.id] || null,
+      noteMomentCdnUrl: u.note_moment_cdn_url || null,
     })));
   } catch (err) {
     console.error('Feed error:', err.message);
