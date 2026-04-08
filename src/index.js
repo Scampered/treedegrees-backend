@@ -12,6 +12,7 @@ import usersRoutes        from './routes/users.js';
 import nicknamesRoutes    from './routes/nicknames.js';
 import lettersRoutes      from './routes/letters.js';
 import adminRoutes        from './routes/admin.js';
+import { startDecayPoller } from './utils/decayPoller.js';
 import groveRoutes        from './routes/grove.js';
 import jobsRoutes         from './routes/jobs.js';
 import jobActionsRoutes   from './routes/jobActions.js';

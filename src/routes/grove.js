@@ -20,6 +20,7 @@ const SEEDS_LABELS = {
   grove_invest_boost:'📈 Investment boost received',
   grove_withdraw:    '💸 Grove withdrawal',
   grove_fee:         '💰 Investment fee earned',
+  inactivity_decay:  '💤 Inactivity penalty',
 }
 
 export async function awardSeeds(userId, amount, reason, client) {
@@ -302,7 +303,7 @@ router.get('/history/:userId', requireAuth, async (req, res) => {
     await maybeSampleHistory(userId)
     const { rows } = await pool.query(
       `SELECT seeds, sampled_at FROM stock_history
-       WHERE user_id=$1 AND sampled_at > NOW() - ($2 || ' hours')::interval
+       WHERE user_id=$1 AND sampled_at > NOW() - make_interval(hours => $2)
        ORDER BY sampled_at ASC`,
       [userId, hours]
     )
