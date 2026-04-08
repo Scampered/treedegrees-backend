@@ -7,12 +7,33 @@ const router = Router();
 const WITHDRAW_FEE = 0.10; // 10% fee on withdrawal
 
 // ── Award seeds for activity (called internally by other routes) ──────────────
+const SEEDS_LABELS = {
+  send_letter:       '✉️ Sent a letter',
+  receive_letter:    '📬 Received a letter',
+  streak_milestone:  '🔥 Streak milestone',
+  daily_note:        '📝 Posted a daily note',
+  set_mood:          '😊 Set your mood',
+  note_reaction:     '❤️ Note reaction received',
+  post_memory:       '📸 Posted a memory',
+  like_received:     '❤️ Someone liked your post',
+  comment_received:  '📝 Note left on your post',
+  grove_invest_boost:'📈 Investment boost received',
+  grove_withdraw:    '💸 Grove withdrawal',
+  grove_fee:         '💰 Investment fee earned',
+}
+
 export async function awardSeeds(userId, amount, reason, client) {
   const db = client || pool;
   await db.query(
     `UPDATE users SET seeds = GREATEST(0, COALESCE(seeds, 100) + $1) WHERE id = $2`,
     [amount, userId]
   );
+  // Log the transaction
+  const label = SEEDS_LABELS[reason] || `🌱 ${reason}`
+  await db.query(
+    `INSERT INTO seeds_log (user_id, amount, reason, label) VALUES ($1, $2, $3, $4)`,
+    [userId, amount, reason, label]
+  ).catch(() => {}) // non-fatal
 }
 
 // ── Sample current score into history ────────────────────────────────────────
@@ -269,6 +290,33 @@ router.get('/leaderboard', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
+
+
+// GET /api/grove/history/:userId — price history for chart (window param)
+router.get('/history/:userId', requireAuth, async (req, res) => {
+  const { userId } = req.params
+  const win = req.query.window || '1d'
+  // Window in hours
+  const hours = win === '1h' ? 1 : win === '6h' ? 6 : win === '12h' ? 12 : win === '1w' ? 168 : 24
+  try {
+    await maybeSampleHistory(userId)
+    const { rows } = await pool.query(
+      `SELECT seeds, sampled_at FROM stock_history
+       WHERE user_id=$1 AND sampled_at > NOW() - ($2 || ' hours')::interval
+       ORDER BY sampled_at ASC`,
+      [userId, hours]
+    )
+    const pts = rows.map(r => ({ seeds: r.seeds, ts: r.sampled_at }))
+    // Ensure at least 2 points so chart renders
+    if (pts.length < 2) {
+      const { rows:[u] } = await pool.query(`SELECT seeds FROM users WHERE id=$1`, [userId])
+      const s = u?.seeds || 0
+      pts.unshift({ seeds: s, ts: new Date(Date.now() - hours*3600*1000).toISOString() })
+      if (pts.length < 2) pts.push({ seeds: s, ts: new Date().toISOString() })
+    }
+    res.json(pts)
+  } catch(e) { console.error(e.message); res.status(500).json({ error:'Server error' }) }
+})
 
 // GET /api/grove/seeds — quick balance for nav badge
 router.get('/seeds', requireAuth, async (req, res) => {

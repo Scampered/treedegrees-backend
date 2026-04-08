@@ -1,5 +1,6 @@
 // src/routes/moments.js — Cloudflare R2 photo moments
 import { Router } from 'express';
+import { awardSeeds } from './grove.js';
 import { getRoute } from '../utils/routeFetcher.js';
 import pool from '../db/pool.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -64,8 +65,8 @@ router.post('/', requireAuth, async (req, res) => {
     );
 
     // Award 50 seeds — we already confirmed above this is first post today
-    await pool.query(`UPDATE users SET seeds=COALESCE(seeds,0)+50 WHERE id=$1`, [req.user.id])
-    notify(req.user.id, 'seeds_earned', '\u{1F331} +50 seeds', 'Seeds for posting a memory today!', '/grove').catch(()=>{})
+    await awardSeeds(req.user.id, 50, 'post_memory')
+    notify(req.user.id, 'seeds_earned', '🌱 +50 seeds', 'Seeds for posting a memory today!', '/grove').catch(()=>{})
 
     // Tag connections
     const validTagIds = [];
@@ -198,7 +199,8 @@ router.post('/:id/like', requireAuth, async (req, res) => {
       const { rows:[liker] } = await pool.query(
         `SELECT COALESCE(nickname,split_part(full_name,' ',1)) AS name FROM users WHERE id=$1`, [req.user.id]
       )
-      notify(m.uploader_id, 'note_posted', `❤️ ${liker?.name} liked your memory`, '', '/my-world').catch(()=>{})
+      await awardSeeds(m.uploader_id, 10, 'like_received')
+      notify(m.uploader_id, 'note_posted', `❤️ ${liker?.name} liked your memory`, '+10 🌱 seeds', '/my-world').catch(()=>{})
     }
     res.json({ ok:true, likeCount: parseInt(count, 10) })
   } catch(e) { res.status(500).json({ error:'Server error' }) }
@@ -268,7 +270,7 @@ router.post('/:id/comment', requireAuth, async (req, res) => {
     )
     // Notify uploader + award seeds for comment
     if (m.uploader_id !== req.user.id) {
-      await pool.query(`UPDATE users SET seeds=COALESCE(seeds,0)+10 WHERE id=$1`, [m.uploader_id])
+      await awardSeeds(m.uploader_id, 10, 'comment_received')
       notify(m.uploader_id, 'note_posted', `📝 ${u.name} left a note on your memory`,
         `+10 🌱 · "${text.trim().slice(0,40)}"`, '/my-world').catch(()=>{})
     }
