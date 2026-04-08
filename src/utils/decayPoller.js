@@ -3,7 +3,6 @@
 // Inactive = no letter sent, no note posted, no memory posted today
 
 import pool from '../db/pool.js'
-import { awardSeeds } from '../routes/grove.js'
 
 const DECAY_AMOUNTS = {
   no_letter:  -8,   // didn't send a letter today
@@ -59,7 +58,14 @@ async function runDecay() {
         if (currentSeeds > 50) {
           // Cap decay so balance never goes below 50
           const actualDecay = Math.max(totalDecay, 50 - currentSeeds)
-          await awardSeeds(u.id, actualDecay, 'inactivity_decay')
+          await pool.query(
+            `UPDATE users SET seeds = GREATEST(0, COALESCE(seeds,0) + $1) WHERE id=$2`,
+            [actualDecay, u.id]
+          )
+          await pool.query(
+            `INSERT INTO seeds_log (user_id, amount, reason, label) VALUES ($1,$2,$3,$4)`,
+            [u.id, actualDecay, 'inactivity_decay', '💤 Inactivity penalty']
+          ).catch(()=>{})
           decayed++
         }
       }
