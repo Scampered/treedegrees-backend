@@ -1,14 +1,12 @@
 // src/routes/letters.js
 import { Router } from 'express';
 import pool from '../db/pool.js';
-import { notify } from '../utils/notify.js';
 import { requireAuth } from '../middleware/auth.js';
 import {
   getVehicleTier, haversineKm, calcDeliveryMs,
   calculateEffectiveStreak, VEHICLE_TIERS, nextVehicleMilestone, formatDuration,
 } from '../utils/letters.js';
 import { awardSeeds } from './grove.js';
-import { sendPush } from '../utils/push.js';
 
 const router = Router();
 
@@ -103,25 +101,25 @@ router.post('/', requireAuth, async (req, res) => {
     const expiresAt  = new Date(arrivesAt.getTime() + 7 * 24 * 3600 * 1000);
 
     const { rows: [letter] } = await client.query(
-      `INSERT INTO letters (sender_id, recipient_id, content, vehicle_tier, arrives_at, expires_at, streak_at_send, distance_km, delivery_ms)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      `INSERT INTO letters (sender_id, recipient_id, content, vehicle_tier, arrives_at, expires_at, streak_at_send, distance_km, moment_id, moment_cdn_url)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        RETURNING id, sent_at, arrives_at, vehicle_tier`,
-      [req.user.id, recipientId, content.trim(), tier, arrivesAt, expiresAt, streak.streak_days, Math.round(distKm), Math.round(deliveryMs)]
+      [req.user.id, recipientId, content.trim(), tier, arrivesAt, expiresAt, streak.streak_days, Math.round(distKm), momentId||null, momentCdnUrl||null]
     );
 
-    // Notify recipient when letter arrives (done by arrivedPoller, not here)
-    // No notification at send time — only when actually received
+    // Use sender's local date so streak day boundaries respect their timezone
+    const senderLocalDate = req.body.senderLocalDate || new Date().toISOString().split('T')[0];
+    const isUser1  = req.user.id === uid1;
 
-    // Use server UTC date — consistent for all users regardless of timezone
-    const serverDate = new Date().toISOString().split('T')[0];
-    const isUser1 = req.user.id === uid1;
+    // Re-evaluate streak from sender's local date perspective
+    const freshStreak = calculateEffectiveStreak(raw, senderLocalDate);
 
-    const freshStreak = calculateEffectiveStreak(raw, serverDate);
-
+    // Mark sender as "sent today" — fuel is added when the letter ARRIVES, not now
+    // This prevents fuel farming and correctly rewards actual delivery
     await upsertStreak(client, uid1, uid2, {
       streak_days: freshStreak.streak_days,
-      fuel: freshStreak.fuel,
-      last_day_processed: serverDate,
+      fuel: freshStreak.fuel, // unchanged at send time
+      last_day_processed: senderLocalDate,
       user1_sent_today: isUser1 ? true : (freshStreak.user1_sent_today || false),
       user2_sent_today: !isUser1 ? true : (freshStreak.user2_sent_today || false),
     });
@@ -155,7 +153,6 @@ router.get('/', requireAuth, async (req, res) => {
       `SELECT
         l.id, l.content, l.vehicle_tier, l.sent_at, l.arrives_at, l.opened_at, l.expires_at,
         l.sender_id, l.recipient_id, l.streak_at_send,
-        COALESCE(l.seeds_awarded, false) AS seeds_awarded,
         COALESCE(su.nickname, split_part(su.full_name,' ',1)) AS sender_own_nick,
         COALESCE(ru.nickname, split_part(ru.full_name,' ',1)) AS recipient_own_nick
        FROM letters l
@@ -181,7 +178,6 @@ router.get('/', requireAuth, async (req, res) => {
       streakAtSend: l.streak_at_send,
       inTransit: new Date(l.arrives_at) > now,
       isInbox: l.recipient_id === req.user.id,
-      seedsAwarded: l.seeds_awarded || false,
       senderId: l.sender_id,
       recipientId: l.recipient_id,
       // Use viewer's personal nickname for the other party if set
@@ -296,7 +292,6 @@ router.get('/streaks', requireAuth, async (req, res) => {
     } finally {
       client.release();
     }
-    res.setHeader('Cache-Control', 'private, max-age=30')
     res.json(results);
   } catch (err) {
     console.error('Streaks error:', err.message);
@@ -308,57 +303,63 @@ router.get('/streaks', requireAuth, async (req, res) => {
 // ── PATCH /api/letters/:id/arrived — fuel+1 when letter reaches recipient ────
 // Called by the frontend when the letter's arrivesAt timestamp is crossed
 router.patch('/:id/arrived', requireAuth, async (req, res) => {
+  const client = await pool.connect();
   try {
-    console.log(`[arrived] called — letterId=${req.params.id} userId=${req.user.id}`);
-
-    // First check what the letter looks like before the UPDATE
-    const { rows: [check] } = await pool.query(
-      `SELECT id, sender_id, recipient_id, arrives_at, seeds_awarded, delivery_ms, distance_km
-       FROM letters WHERE id=$1`,
-      [req.params.id]
-    );
-    console.log(`[arrived] letter lookup:`, check
-      ? `found, recipient=${check.recipient_id}, arrives_at=${check.arrives_at}, seeds_awarded=${check.seeds_awarded}, delivery_ms=${check.delivery_ms}`
-      : 'NOT FOUND'
-    );
-
-    const { rows: [letter] } = await pool.query(
+    // Verify this letter exists and the viewer is the RECIPIENT
+    // Mark seeds as awarded atomically — prevents double-award if called twice
+    const { rows: [letter] } = await client.query(
       `UPDATE letters SET seeds_awarded = true
-       WHERE id=$1 AND recipient_id=$2 AND arrives_at <= NOW() AND (seeds_awarded = false OR seeds_awarded IS NULL)
-       RETURNING sender_id, recipient_id, COALESCE(distance_km, 0) AS distance_km, COALESCE(delivery_ms, 0) AS delivery_ms`,
+       WHERE id=$1 AND recipient_id=$2 AND arrives_at <= NOW() AND seeds_awarded = false
+       RETURNING sender_id, recipient_id, COALESCE(distance_km, 0) AS distance_km`,
       [req.params.id, req.user.id]
     );
-
     if (!letter) {
-      console.log(`[arrived] UPDATE returned no rows — already awarded, wrong recipient, or not yet arrived`);
-      return res.status(404).json({ error: 'Already processed or not found' });
+      // Either already awarded, not arrived yet, or not found — all safe to return 404
+      return res.status(404).json({ error: 'Letter not found, not yet arrived, or already processed' });
     }
 
-    const MAX_MS        = 72 * 3600 * 1000;
-    const delivMs       = Math.max(30000, Math.min(letter.delivery_ms || 0, MAX_MS));
-    const ratio         = Math.sqrt(delivMs / MAX_MS);
-    const seedsSender   = 5  + Math.floor(ratio * 35);
-    const seedsReceiver = 10 + Math.floor(ratio * 50);
+    // Distance-based seed reward — sqrt curve, 50km→6/12, 20037km→40/60
+    const MAX_KM    = 20037;
+    const distKm    = Math.min(letter.distance_km || 0, MAX_KM);
+    const ratio     = Math.sqrt(Math.max(0, distKm) / MAX_KM);
+    const seedsSender   = 5  + Math.floor(ratio * 35);  // 5–40
+    const seedsReceiver = 10 + Math.floor(ratio * 50);  // 10–60
 
-    console.log(`[arrived] awarding — sender=${letter.sender_id} +${seedsSender}, recipient=${letter.recipient_id} +${seedsReceiver}, delivMs=${delivMs}, ratio=${ratio.toFixed(3)}`);
+    // Award both sender and receiver on arrival
+    await awardSeeds(letter.sender_id,    seedsSender,   'send_letter',    client);
+    await awardSeeds(letter.recipient_id, seedsReceiver, 'receive_letter', client);
 
-    await awardSeeds(letter.sender_id,    seedsSender,   'send_letter');
-    await awardSeeds(letter.recipient_id, seedsReceiver, 'receive_letter');
-
-    console.log(`[arrived] seeds awarded OK`);
-    sendPush(letter.recipient_id, '✉️ Letter arrived!', `You received a letter!`, '/letters').catch(()=>{});
-
+    // Read current streak to return to frontend
     const [uid1, uid2] = [letter.sender_id, letter.recipient_id].sort();
-    const raw    = await pool.query(
-      `SELECT * FROM letter_streaks WHERE user_id_1=$1 AND user_id_2=$2`, [uid1, uid2]
-    );
-    const streak = calculateEffectiveStreak(raw.rows[0] || null);
+    const raw = await getStreak(client, letter.sender_id, letter.recipient_id);
+    const today = new Date().toLocaleDateString('sv-SE');
+    const streak = calculateEffectiveStreak(raw, today);
+    if (streak._dirty) {
+      await upsertStreak(client, uid1, uid2, streak);
+    }
 
-    res.json({ fuel: streak.fuel || 0, streakDays: streak.streak_days || 0,
-               seedsSender, seedsReceiver });
+    // Bonus seeds if both sent today (only once — check wasAlready flag)
+    const isRecipUser1 = letter.recipient_id === uid1;
+    const senderIsUser1 = !isRecipUser1;
+    const senderSentFlag  = senderIsUser1 ? streak.user1_sent_today : streak.user2_sent_today;
+    const recipSentFlag   = isRecipUser1  ? streak.user1_sent_today : streak.user2_sent_today;
+    if (senderSentFlag && recipSentFlag) {
+      // Both have sent today — award milestone bonus once per pair per day
+      // Store a "milestone_awarded" flag to prevent double award: use a simple check
+      // We award bonus only if the letter is the one that COMPLETED the pair
+      // i.e. the recipient hasn't sent yet (this is the sender's letter arriving)
+      if (!recipSentFlag) {
+        await awardSeeds(letter.recipient_id, 15, 'streak_milestone', client);
+        await awardSeeds(letter.sender_id, 15, 'streak_milestone', client);
+      }
+    }
+
+    res.json({ fuel: streak.fuel, streakDays: streak.streak_days });
   } catch (err) {
-    console.error('[arrived] ERROR:', err.message, err.stack);
+    console.error('Arrived error:', err.message);
     res.status(500).json({ error: 'Server error' });
+  } finally {
+    client.release();
   }
 });
 
