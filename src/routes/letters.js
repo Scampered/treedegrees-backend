@@ -48,7 +48,7 @@ function resolveDisplayName(userId, ownNickname, myNicknameMap) {
 router.post('/', requireAuth, async (req, res) => {
   const client = await pool.connect();
   try {
-    const { recipientId, content } = req.body;
+    const { recipientId, content, momentId, momentCdnUrl } = req.body;
     if (!recipientId || !content?.trim())
       return res.status(400).json({ error: 'Recipient and content are required' });
     if (content.trim().length > 500)
@@ -153,6 +153,7 @@ router.get('/', requireAuth, async (req, res) => {
       `SELECT
         l.id, l.content, l.vehicle_tier, l.sent_at, l.arrives_at, l.opened_at, l.expires_at,
         l.sender_id, l.recipient_id, l.streak_at_send,
+        l.moment_id, l.moment_cdn_url,
         COALESCE(su.nickname, split_part(su.full_name,' ',1)) AS sender_own_nick,
         COALESCE(ru.nickname, split_part(ru.full_name,' ',1)) AS recipient_own_nick
        FROM letters l
@@ -183,6 +184,8 @@ router.get('/', requireAuth, async (req, res) => {
       // Use viewer's personal nickname for the other party if set
       senderName: resolveDisplayName(l.sender_id, l.sender_own_nick, myNicknameMap),
       recipientName: resolveDisplayName(l.recipient_id, l.recipient_own_nick, myNicknameMap),
+      momentId: l.moment_id || null,
+      momentCdnUrl: l.moment_cdn_url || null,
     })));
   } catch (err) {
     console.error('Get letters error:', err.message);

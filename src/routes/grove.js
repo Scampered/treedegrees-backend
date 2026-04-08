@@ -31,8 +31,8 @@ async function maybeSampleHistory(userId) {
   );
   if (!u) return;
   await pool.query(
-    `INSERT INTO stock_history (user_id, score, seeds) VALUES ($1, $2, $3)`,
-    [userId, u.seeds, u.seeds]
+    `INSERT INTO stock_history (user_id, seeds) VALUES ($1, $2)`,
+    [userId, u.seeds]
   );
   // Keep only last 48 samples (6 days at 3h intervals)
   await pool.query(
