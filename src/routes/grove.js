@@ -270,6 +270,14 @@ router.get('/leaderboard', requireAuth, async (req, res) => {
 });
 
 
+// GET /api/grove/seeds — quick balance for nav badge
+router.get('/seeds', requireAuth, async (req, res) => {
+  try {
+    const { rows:[u] } = await pool.query(`SELECT seeds FROM users WHERE id=$1`, [req.user.id])
+    res.json({ seeds: u?.seeds ?? 0 })
+  } catch(e) { res.status(500).json({ error:'Server error' }) }
+})
+
 // GET /api/grove/seeds-log — transaction history for banking view
 router.get('/seeds-log', requireAuth, async (req, res) => {
   try {
