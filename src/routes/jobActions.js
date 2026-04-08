@@ -638,6 +638,30 @@ router.get('/farmer/plot', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Server error' }) }
 })
 
+
+// POST /api/job-actions/farmer/buy-plot — unlock a new plot slot (100 seeds)
+router.post('/farmer/buy-plot', requireAuth, async (req, res) => {
+  const PLOT_COST = 100
+  const MAX_SLOTS = 5
+  try {
+    const { rows: [me] } = await pool.query(`SELECT seeds FROM users WHERE id=$1`, [req.user.id])
+    if ((me?.seeds || 0) < PLOT_COST) return res.status(400).json({ error: `Need ${PLOT_COST} seeds to unlock a plot` })
+
+    const { rows: existing } = await pool.query(
+      `SELECT slot_index FROM farmer_plots WHERE farmer_id=$1`, [req.user.id]
+    )
+    if (existing.length >= MAX_SLOTS) return res.status(400).json({ error: 'Maximum 5 plots unlocked' })
+
+    const nextSlot = existing.length
+    await pool.query(`UPDATE users SET seeds=seeds-$1 WHERE id=$2`, [PLOT_COST, req.user.id])
+    await pool.query(
+      `INSERT INTO farmer_plots (farmer_id, slot_index, status) VALUES ($1,$2,'empty')`,
+      [req.user.id, nextSlot]
+    )
+    res.json({ ok: true, slotIndex: nextSlot })
+  } catch(e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
+})
+
 // POST /api/job-actions/farmer/plant — farmer plants a seed in a slot
 router.post('/farmer/plant', requireAuth, async (req, res) => {
   const { slotIndex, seeds } = req.body
