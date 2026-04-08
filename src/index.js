@@ -159,4 +159,14 @@ app.listen(PORT, () => {
   // Start background pollers (staggered to avoid DB burst)
   startArrivedPoller();
   startJobPollers();
+
+  // Self-ping every 4 minutes to prevent Render free tier hibernation
+  if (process.env.NODE_ENV === 'production') {
+    setInterval(() => {
+      fetch(`https://treedegrees-api.onrender.com/health`)
+        .then(() => console.log('[keepalive] ping ok'))
+        .catch(() => {})
+    }, 4 * 60 * 1000)
+    console.log('[keepalive] self-ping started (every 4 min)')
+  }
 });
