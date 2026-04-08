@@ -89,7 +89,7 @@ router.patch('/courier/request/:id', requireAuth, async (req, res) => {
   const { action } = req.body // 'accept' | 'decline'
   try {
     const { rows: [cr] } = await pool.query(
-      `UPDATE courier_requests SET status=$1, accepted_at=CASE WHEN $1='accepted' THEN NOW() ELSE NULL END
+      `UPDATE courier_requests SET status=$1::text, accepted_at=CASE WHEN $1::text='accepted' THEN NOW() ELSE NULL END
        WHERE id=$2 AND courier_id=$3 AND status='pending' RETURNING *`,
       [action === 'accept' ? 'accepted' : 'declined', req.params.id, req.user.id]
     )
@@ -251,7 +251,7 @@ router.post('/broker/open', requireAuth, async (req, res) => {
     await pool.query(`UPDATE users SET seeds=seeds-$1 WHERE id=$2`, [amt, req.user.id])
     const { rows: [session] } = await pool.query(
       `INSERT INTO broker_sessions (broker_id, client_id, escrow_seeds, duration_hours, closes_at)
-       VALUES ($1,$2,$3,$4, NOW() + make_interval(hours => $4)) RETURNING id`,
+       VALUES ($1,$2,$3,$4, NOW() + make_interval(hours => $4::int)) RETURNING id`,
       [brokerId, req.user.id, amt, dur]
     )
     sendPush(brokerId, '🌱 New broker client!', `${amt} seeds for ${dur}h session.`, '/jobs').catch(() => {})
@@ -651,7 +651,7 @@ router.post('/farmer/plant', requireAuth, async (req, res) => {
     if (slot.status === 'deposited') {
       // Plant a client's deposit — no seed cost to farmer
       await pool.query(
-        `UPDATE farmer_plots SET status='planted', harvest_at=NOW() + make_interval(hours => $1) WHERE id=$2`,
+        `UPDATE farmer_plots SET status='planted', harvest_at=NOW() + make_interval(hours => $1::int) WHERE id=$2`,
         [HARVEST_HOURS, slot.id]
       )
       res.json({ ok: true, harvestAt: new Date(Date.now() + HARVEST_HOURS * 3600000), fromDeposit: true })
@@ -665,7 +665,7 @@ router.post('/farmer/plant', requireAuth, async (req, res) => {
     await pool.query(`UPDATE users SET seeds=seeds-$1 WHERE id=$2`, [amt, req.user.id])
     await pool.query(
       `UPDATE farmer_plots SET status='planted', seeds_deposited=$1, depositor_id=NULL,
-       planted_at=NOW(), harvest_at=NOW() + make_interval(hours => $2)
+       planted_at=NOW(), harvest_at=NOW() + make_interval(hours => $2::int)
        WHERE id=$3`,
       [amt, HARVEST_HOURS, slot.id]
     )
