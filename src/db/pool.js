@@ -8,7 +8,7 @@ const { Pool } = pg;
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-  max: 4,                          // conservative for Supabase free tier
+  max: 3,                          // conservative for Supabase free tier
   min: 1,                          // keep one warm connection
   idleTimeoutMillis: 20000,        // drop idle connections after 20s
   connectionTimeoutMillis: 8000,   // wait up to 8s for a connection
