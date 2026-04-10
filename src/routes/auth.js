@@ -136,7 +136,7 @@ router.get('/me', requireAuth, async (req, res) => {
       `SELECT id, full_name, nickname, email, city, country, latitude, longitude,
               friend_code, bio, is_public, connections_public, location_privacy,
               daily_note, daily_note_updated_at, daily_mood, daily_mood_updated_at,
-              note_moment_cdn_url, email_verified, created_at
+              note_moment_cdn_url, owned_themes, email_verified, created_at
        FROM users WHERE id = $1 AND deleted_at IS NULL`,
       [req.user.id]
     );
@@ -154,6 +154,7 @@ router.get('/me', requireAuth, async (req, res) => {
         ? u.daily_note : null,
       dailyNoteUpdatedAt: u.daily_note_updated_at,
       noteMomentCdnUrl: u.note_moment_cdn_url || null,
+      ownedThemes: u.owned_themes || [],
       mood: u.daily_mood_updated_at &&
         (Date.now() - new Date(u.daily_mood_updated_at).getTime()) < 86400000
         ? u.daily_mood : null,
