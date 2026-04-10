@@ -457,4 +457,22 @@ router.get('/seeds-log', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error:'Server error' }) }
 })
 
+
+// POST /api/grove/spend — deduct seeds for a purchase (themes etc)
+router.post('/spend', requireAuth, async (req, res) => {
+  const { amount, reason } = req.body
+  const amt = Math.floor(Number(amount))
+  if (!amt || amt < 1) return res.status(400).json({ error: 'Invalid amount' })
+  try {
+    const { rows: [u] } = await pool.query(`SELECT seeds FROM users WHERE id=$1 FOR UPDATE`, [req.user.id])
+    if (!u || u.seeds < amt) return res.status(400).json({ error: 'Not enough seeds' })
+    await pool.query(`UPDATE users SET seeds=seeds-$1 WHERE id=$2`, [amt, req.user.id])
+    await pool.query(
+      `INSERT INTO seeds_log (user_id, amount, reason, label) VALUES ($1,$2,$3,$4)`,
+      [req.user.id, -amt, reason || 'purchase', `🛒 Marketplace purchase`]
+    ).catch(() => {})
+    res.json({ ok: true, newBalance: u.seeds - amt })
+  } catch(e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
+})
+
 export default router;
