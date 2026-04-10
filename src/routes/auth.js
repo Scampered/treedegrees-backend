@@ -271,6 +271,33 @@ router.delete('/account', requireAuth, async (req, res) => {
 });
 
 
+
+// ── DELETE /api/auth/account/unverified — delete own unverified account (no password needed) ──
+router.delete('/account/unverified', requireAuth, async (req, res) => {
+  try {
+    const { rows: [u] } = await pool.query(
+      `SELECT email_verified FROM users WHERE id=$1 AND deleted_at IS NULL`, [req.user.id]
+    )
+    if (!u) return res.status(404).json({ error: 'User not found' })
+    if (u.email_verified) return res.status(403).json({ error: 'Cannot use this endpoint for verified accounts' })
+
+    await pool.query(
+      `UPDATE users SET
+        deleted_at = NOW(),
+        email = 'deleted_' || id || '@treedegrees.deleted',
+        full_name = '[Deleted User]', nickname = '[Deleted]',
+        password_hash = '', bio = NULL, daily_note = NULL,
+        date_of_birth = '1900-01-01'
+       WHERE id = $1`,
+      [req.user.id]
+    )
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Delete unverified error:', err.message)
+    res.status(500).json({ error: 'Server error' })
+  }
+})
+
 // ── POST /api/auth/forgot-password ───────────────────────────────────────────
 router.post('/forgot-password', async (req, res) => {
   const { email } = req.body;
