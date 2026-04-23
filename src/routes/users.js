@@ -337,3 +337,18 @@ router.get('/feed', requireAuth, async (req, res) => {
 
 export { getCapitalCoords };
 export default router;
+
+// POST /api/users/award-streak-saver — add 1 streak saver to user (called after marketplace purchase)
+router.post('/award-streak-saver', requireAuth, async (req, res) => {
+  try {
+    await pool.query(
+      `UPDATE users SET streak_savers = COALESCE(streak_savers, 0) + 1 WHERE id=$1`,
+      [req.user.id]
+    )
+    const { rows:[u] } = await pool.query(`SELECT streak_savers FROM users WHERE id=$1`, [req.user.id])
+    res.json({ ok: true, streakSavers: u.streak_savers })
+  } catch(e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
+})
+
+
+export default router;
