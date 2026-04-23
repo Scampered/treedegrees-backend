@@ -7,6 +7,7 @@ import {
   calculateEffectiveStreak, VEHICLE_TIERS, nextVehicleMilestone, formatDuration,
 } from '../utils/letters.js';
 import { awardSeeds } from './grove.js';
+import { updateMarketPrice } from './market.js';
 import { sendPush } from '../utils/push.js';
 
 const router = Router();
@@ -128,7 +129,8 @@ router.post('/', requireAuth, async (req, res) => {
     });
 
     // Seeds awarded on ARRIVAL only (both sender and receiver) — prevents farming
-    // distKm is available here and stored in the letter for arrival lookup
+    // Letter sent → crude rises (fuel demand)
+    updateMarketPrice('crude', 2).catch(() => {})
     res.status(201).json({
       id: letter.id, sentAt: letter.sent_at,
       arrivesAt: letter.arrives_at, vehicleTier: letter.vehicle_tier,
@@ -349,8 +351,10 @@ router.patch('/:id/arrived', requireAuth, async (req, res) => {
 
     await awardSeeds(letter.sender_id,    seedsSender,   'send_letter');
     await awardSeeds(letter.recipient_id, seedsReceiver, 'receive_letter');
-
     console.log(`[arrived] seeds awarded OK`);
+    // Letter arrived → canopy rises (platform activity), crude eases
+    updateMarketPrice('canopy', 3).catch(() => {})
+    updateMarketPrice('crude', -1).catch(() => {})
     sendPush(letter.recipient_id, '✉️ Letter arrived!', `You received a letter!`, '/letters').catch(()=>{});
 
     const [uid1, uid2] = [letter.sender_id, letter.recipient_id].sort();
@@ -449,6 +453,8 @@ router.post('/use-streak-saver', requireAuth, async (req, res) => {
     ).catch(()=>{})
 
     await client.query('COMMIT')
+    // Saver used = fuel consumption = crude demand rises
+    updateMarketPrice('crude', 3).catch(() => {})
     res.json({ ok: true, restoredDays: streak.broken_streak_days, saversLeft: me.streak_savers - 1 })
   } catch(e) {
     await client.query('ROLLBACK')

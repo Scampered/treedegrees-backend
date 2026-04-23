@@ -51,6 +51,7 @@ export function calcDeliveryMs(distKm, vehicleTier) {
 // No cron needed — we calculate missed days when the streak is fetched.
 export function calculateEffectiveStreak(record) {
   if (!record) {
+    // New streak: starts with 3 fuel per friendship
     return { streak_days: 0, fuel: 3, user1_sent_today: false, user2_sent_today: false, broken_at: null, broken_streak_days: 0 }
   }
 
@@ -59,9 +60,11 @@ export function calculateEffectiveStreak(record) {
     ? record.last_day_processed.toISOString().split('T')[0]
     : String(record.last_day_processed || today)
 
-  if (lastProcessed === today) return record // already up to date for today
+  if (lastProcessed === today) return record
 
-  let { streak_days, fuel, user1_sent_today, user2_sent_today, broken_at, broken_streak_days } = record
+  let { streak_days, user1_sent_today, user2_sent_today, broken_at, broken_streak_days } = record
+  // Fuel defaults to 3 for existing records that don't have it yet
+  let fuel = record.fuel ?? 3
 
   const daysDiff = Math.max(0, Math.floor(
     (new Date(today) - new Date(lastProcessed)) / 86400000
@@ -72,27 +75,39 @@ export function calculateEffectiveStreak(record) {
       // Yesterday — did both send?
       if (user1_sent_today && user2_sent_today) {
         streak_days += 1
-        broken_at = null // healed if both sent
+        broken_at = null
         broken_streak_days = 0
-      } else if (streak_days > 0 && !broken_at) {
-        // Streak just broke — record the break
-        broken_at = new Date().toISOString()
-        broken_streak_days = streak_days
-        streak_days = 0
+      } else if (streak_days > 0) {
+        // Missed a day — consume 1 fuel to save streak
+        if (fuel > 0) {
+          fuel -= 1
+          // Streak preserved but fuel used
+        } else {
+          // No fuel left — streak breaks
+          broken_at = broken_at || new Date().toISOString()
+          broken_streak_days = broken_streak_days || streak_days
+          streak_days = 0
+        }
       }
-    } else if (streak_days > 0) {
-      // Multi-day gap — streak breaks immediately
-      if (!broken_at) {
-        broken_at = new Date().toISOString()
-        broken_streak_days = streak_days
+    } else {
+      // Multi-day gap — each extra day burns more fuel or breaks
+      if (streak_days > 0) {
+        if (fuel > 0) { fuel -= 1 }
+        else {
+          broken_at = broken_at || new Date().toISOString()
+          broken_streak_days = broken_streak_days || streak_days
+          streak_days = 0
+        }
       }
-      streak_days = 0
     }
     user1_sent_today = false
     user2_sent_today = false
   }
 
-  // If broken_at is older than 3 days, clear the broken state
+  // Fuel refills when both send (reward for activity)
+  // Handled separately when letter arrives
+
+  // Clear broken state after 3 days
   if (broken_at) {
     const daysSinceBroken = (Date.now() - new Date(broken_at).getTime()) / 86400000
     if (daysSinceBroken >= 3) {
@@ -104,7 +119,7 @@ export function calculateEffectiveStreak(record) {
   return {
     ...record,
     streak_days,
-    fuel, // fuel is now streak_savers, managed separately on users table
+    fuel,
     user1_sent_today,
     user2_sent_today,
     broken_at,

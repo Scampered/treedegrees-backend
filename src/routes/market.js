@@ -3,7 +3,6 @@ import { Router } from 'express';
 import pool from '../db/pool.js';
 import { requireAuth } from '../middleware/auth.js';
 import { awardSeeds } from './grove.js';
-import { updateMarketPrice } from '../utils/marketEvents.js';
 
 const router = Router();
 
@@ -14,6 +13,46 @@ const WITHDRAW_FEE_RATE = (principal) => {
   return 0.20;
 };
 const MAX_MULTIPLIER = 10;
+
+// ── Internal: update market price ─────────────────────────────────────────────
+export async function updateMarketPrice(market, delta, client) {
+  const db = client || pool;
+  const { rows: [state] } = await db.query(
+    `UPDATE market_state SET price = GREATEST(1, price + $1), last_updated = NOW()
+     WHERE market = $2 RETURNING price`,
+    [delta, market]
+  );
+  if (!state) return;
+  // Record history point
+  await pool.query(
+    `INSERT INTO market_history (market, price) VALUES ($1, $2)`,
+    [market, state.price]
+  );
+  // Trim to 288 points (2 points/hour × 6 days)
+  await pool.query(
+    `DELETE FROM market_history WHERE market=$1 AND id NOT IN (
+       SELECT id FROM market_history WHERE market=$1 ORDER BY sampled_at DESC LIMIT 288
+     )`, [market]
+  );
+  return state.price;
+}
+
+// ── Internal: compute crude price effect on economy ──────────────────────────
+export async function applyCrudeEconomyEffect(client) {
+  const db = client || pool;
+  const { rows: [crude] }  = await db.query(`SELECT price FROM market_state WHERE market='crude'`);
+  const { rows: [canopy] } = await db.query(`SELECT price FROM market_state WHERE market='canopy'`);
+  if (!crude || !canopy) return;
+
+  // When crude > 70 (high oil), economy takes a drag proportional to excess
+  const CRUDE_NORMAL = 50;
+  const excess = Math.max(0, crude.price - CRUDE_NORMAL);
+  if (excess > 5) {
+    const drag = Math.floor(excess * 0.3); // 0.3 economy points lost per 1 oil point above 50
+    await updateMarketPrice('canopy', -drag, client);
+    console.log(`[Market] Crude drag: −${drag} to canopy (crude=${crude.price})`);
+  }
+}
 
 // ── Internal: get crude delivery multiplier (for letters/couriers) ────────────
 export async function getCrudeDeliveryMultiplier() {
@@ -118,11 +157,12 @@ router.post('/invest', requireAuth, async (req, res) => {
 
     // Investment activity lifts the canopy slightly
     if (market === 'canopy') {
-      updateMarketPrice('canopy', Math.floor(amt * 0.01)).catch(() => {});
+      await updateMarketPrice('canopy', Math.floor(amt * 0.01), client);
     }
     // Investing in crude nudges price up slightly (demand signal)
     if (market === 'crude') {
-      updateMarketPrice('crude', Math.floor(amt * 0.005)).catch(() => {});
+      await updateMarketPrice('crude', Math.floor(amt * 0.005), client);
+      await applyCrudeEconomyEffect(client);
     }
 
     await client.query('COMMIT');
@@ -180,7 +220,8 @@ router.post('/withdraw', requireAuth, async (req, res) => {
 
     // Withdrawal drags the market slightly (confidence signal)
     const drag = Math.floor(principal * 0.005);
-    updateMarketPrice(market, -drag).catch(() => {});
+    await updateMarketPrice(market, -drag, client);
+    if (market === 'crude') await applyCrudeEconomyEffect(client);
 
     await client.query('COMMIT');
     res.json({ ok: true, returned: payout, principal, fee, multiplier: Math.round(multiplier*100)/100, partial: isPartial });
@@ -189,5 +230,52 @@ router.post('/withdraw', requireAuth, async (req, res) => {
     console.error(err.message); res.status(500).json({ error: 'Server error' });
   } finally { client.release(); }
 });
+
+export default router;
+
+// ── Market decay poller — called every hour from index.js ─────────────────────
+// Canopy: decays slowly when no letters arrive (platform inactivity)
+// Crude:  mean-reverts toward 50 when no letters sent
+export async function runMarketDecay() {
+  try {
+    const { rows: [crude] }  = await pool.query(`SELECT price FROM market_state WHERE market='crude'`)
+    const { rows: [canopy] } = await pool.query(`SELECT price FROM market_state WHERE market='canopy'`)
+    if (!crude || !canopy) return
+
+    const now = Date.now()
+
+    // Count letters sent in last hour
+    const { rows: [activity] } = await pool.query(
+      `SELECT COUNT(*) AS cnt FROM letters WHERE sent_at > NOW() - INTERVAL '1 hour'`
+    )
+    const lettersThisHour = parseInt(activity.cnt) || 0
+
+    // ── Canopy passive decay ──────────────────────────────────────────────────
+    // Base decay: -1 per hour regardless. Extra -2 if no letters at all.
+    // Activity boost: +0.5 per letter sent (capped at +10)
+    const canopyDecay  = -1 - (lettersThisHour === 0 ? 2 : 0)
+    const canopyBoost  = Math.min(10, lettersThisHour * 0.5)
+    const canopyDelta  = Math.round(canopyDecay + canopyBoost)
+    if (canopyDelta !== 0) {
+      await updateMarketPrice('canopy', canopyDelta)
+      console.log(`[MarketDecay] Canopy ${canopyDelta > 0 ? '+' : ''}${canopyDelta} (letters: ${lettersThisHour})`)
+    }
+
+    // ── Crude mean reversion toward 50 ───────────────────────────────────────
+    // When no letters are being sent, crude drifts back toward baseline (50)
+    const CRUDE_BASE = 50
+    const diff = CRUDE_BASE - crude.price
+    const reversion = Math.sign(diff) * Math.min(Math.abs(diff) * 0.05, 3) // 5% per hour, max 3
+    if (Math.abs(reversion) >= 0.5) {
+      await updateMarketPrice('crude', Math.round(reversion))
+      console.log(`[MarketDecay] Crude ${reversion > 0 ? '+' : ''}${Math.round(reversion)} (mean revert toward ${CRUDE_BASE})`)
+    }
+
+    // Apply crude drag on canopy if crude is very high
+    await applyCrudeEconomyEffect()
+
+  } catch(e) { console.error('[MarketDecay] Error:', e.message) }
+}
+
 
 export default router;

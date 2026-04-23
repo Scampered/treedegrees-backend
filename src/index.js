@@ -12,6 +12,7 @@ import usersRoutes        from './routes/users.js';
 import nicknamesRoutes    from './routes/nicknames.js';
 import lettersRoutes      from './routes/letters.js';
 import adminRoutes        from './routes/admin.js';
+import { runMarketDecay } from './routes/market.js';
 import { startR2CleanupPoller } from './utils/r2Cleanup.js';
 import { startDecayPoller } from './utils/decayPoller.js';
 import groveRoutes        from './routes/grove.js';

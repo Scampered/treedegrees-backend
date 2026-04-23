@@ -3,6 +3,7 @@ import { notifyConnectionsOfNote } from '../utils/noteNotify.js';
 // src/routes/users.js
 import { Router } from 'express';
 import pool from '../db/pool.js';
+import { updateMarketPrice } from './market.js';
 import { requireAuth } from '../middleware/auth.js';
 import { containsProfanity, profanityError } from '../utils/profanity.js';
 
@@ -345,6 +346,8 @@ router.post('/award-streak-saver', requireAuth, async (req, res) => {
       [req.user.id]
     )
     const { rows:[u] } = await pool.query(`SELECT streak_savers FROM users WHERE id=$1`, [req.user.id])
+    // Saver bought = fuel demand = crude rises
+    updateMarketPrice('crude', 3).catch(() => {})
     res.json({ ok: true, streakSavers: u.streak_savers })
   } catch(e) { console.error(e.message); res.status(500).json({ error: 'Server error' }) }
 })
