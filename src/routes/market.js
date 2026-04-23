@@ -231,7 +231,6 @@ router.post('/withdraw', requireAuth, async (req, res) => {
   } finally { client.release(); }
 });
 
-export default router;
 
 // ── Market decay poller — called every hour from index.js ─────────────────────
 // Canopy: decays slowly when no letters arrive (platform inactivity)
@@ -276,6 +275,5 @@ export async function runMarketDecay() {
 
   } catch(e) { console.error('[MarketDecay] Error:', e.message) }
 }
-
 
 export default router;
