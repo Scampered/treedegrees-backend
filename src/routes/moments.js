@@ -1,6 +1,5 @@
 // src/routes/moments.js — Cloudflare R2 photo moments
 import { Router } from 'express';
-import { awardSeeds } from './grove.js';
 import { getRoute } from '../utils/routeFetcher.js';
 import pool from '../db/pool.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -29,17 +28,28 @@ router.post('/', requireAuth, async (req, res) => {
   if (!['image/jpeg','image/png','image/webp'].includes(mimeType))
     return res.status(400).json({ error: 'Only JPEG, PNG, WebP allowed' });
 
-  // 1 post per calendar day (server timezone = UTC)
-  const { rows:[todayCheck] } = await pool.query(
-    `SELECT id FROM moments WHERE uploader_id=$1 AND created_at::date=CURRENT_DATE LIMIT 1`,
-    [req.user.id]
-  )
-  if (todayCheck) return res.status(429).json({ error: 'You have already posted a memory today. Come back tomorrow!' })
-
   // Decode base64
   const buffer = Buffer.from(imageBase64, 'base64');
-  if (buffer.length > 5 * 1024 * 1024) // 5MB max (already compressed client-side)
+  if (buffer.length > 5 * 1024 * 1024)
     return res.status(400).json({ error: 'Image too large (max 5MB)' });
+
+  // Check 24h repost limit
+  const { rows: [lastPost] } = await pool.query(
+    `SELECT id, r2_key, created_at,
+            EXISTS(SELECT 1 FROM seeds_log WHERE user_id=$1 AND reason='post_memory'
+                   AND created_at > NOW() - INTERVAL '24 hours') AS seeds_today
+     FROM moments WHERE uploader_id=$1 AND expires_at > NOW()
+     ORDER BY created_at DESC LIMIT 1`,
+    [req.user.id]
+  );
+  const hoursSinceLast = lastPost
+    ? (Date.now() - new Date(lastPost.created_at).getTime()) / 3600000
+    : 999;
+  if (hoursSinceLast < 24) {
+    const hoursLeft = (24 - hoursSinceLast).toFixed(1);
+    return res.status(429).json({ error: \`You can post a new memory in \${hoursLeft}h\`, hoursLeft: parseFloat(hoursLeft) });
+  }
+  const seedsAlreadyToday = lastPost?.seeds_today || false;
 
   const ext = mimeType === 'image/png' ? 'png' : mimeType === 'image/webp' ? 'webp' : 'jpg';
   const r2Key = `moments/${req.user.id}/${Date.now()}.${ext}`;
@@ -64,9 +74,15 @@ router.post('/', requireAuth, async (req, res) => {
       [req.user.id, r2Key, cdnUrl, (caption||'').slice(0,200), emoji||null]
     );
 
-    // Award 50 seeds — we already confirmed above this is first post today
-    await awardSeeds(req.user.id, 50, 'post_memory')
-    notify(req.user.id, 'seeds_earned', '🌱 +50 seeds', 'Seeds for posting a memory today!', '/grove').catch(()=>{})
+    // Award seeds for posting — only once per 24h
+    if (!seedsAlreadyToday) {
+      await pool.query(`UPDATE users SET seeds=COALESCE(seeds,0)+50 WHERE id=$1`, [req.user.id])
+      await pool.query(
+        `INSERT INTO seeds_log (user_id, amount, reason, label) VALUES ($1,50,'post_memory','📸 Posted a memory')`,
+        [req.user.id]
+      ).catch(()=>{})
+      notify(req.user.id, 'seeds_earned', '🌱 +50 seeds', 'Seeds for posting a memory!', '/grove').catch(()=>{})
+    }
 
     // Tag connections
     const validTagIds = [];
@@ -154,30 +170,19 @@ router.get('/tagged', requireAuth, async (req, res) => {
 router.delete('/:id', requireAuth, async (req, res) => {
   try {
     const { rows:[m] } = await pool.query(
-      `SELECT r2_key, created_at FROM moments WHERE id=$1 AND uploader_id=$2`,
+      `SELECT r2_key FROM moments WHERE id=$1 AND uploader_id=$2`,
       [req.params.id, req.user.id]
-    )
-    if (!m) return res.status(404).json({ error:'Not found' })
+    );
+    if (!m) return res.status(404).json({ error:'Not found' });
     // Delete from R2
     try {
-      const r2 = getR2()
-      await r2.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET_NAME, Key: m.r2_key }))
-    } catch(e) { console.warn('[moments] R2 delete failed:', e.message) }
-    await pool.query(`DELETE FROM moments WHERE id=$1`, [req.params.id])
-    // Deduct 50 seeds if this was posted today and no other post today exists
-    const createdToday = new Date(m.created_at).toDateString() === new Date().toDateString()
-    if (createdToday) {
-      const { rows:[otherToday] } = await pool.query(
-        `SELECT id FROM moments WHERE uploader_id=$1 AND created_at::date=CURRENT_DATE LIMIT 1`,
-        [req.user.id]
-      )
-      if (!otherToday) {
-        await pool.query(`UPDATE users SET seeds=GREATEST(0,COALESCE(seeds,0)-50) WHERE id=$1`, [req.user.id])
-      }
-    }
-    res.json({ ok:true })
-  } catch(e) { res.status(500).json({ error:'Server error' }) }
-})
+      const r2 = getR2();
+      await r2.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET_NAME, Key: m.r2_key }));
+    } catch(e) { console.warn('[moments] R2 delete failed:', e.message); }
+    await pool.query(`DELETE FROM moments WHERE id=$1`, [req.params.id]);
+    res.json({ ok:true });
+  } catch(e) { res.status(500).json({ error:'Server error' }); }
+});
 
 
 // POST /api/moments/:id/like
@@ -199,36 +204,15 @@ router.post('/:id/like', requireAuth, async (req, res) => {
       const { rows:[liker] } = await pool.query(
         `SELECT COALESCE(nickname,split_part(full_name,' ',1)) AS name FROM users WHERE id=$1`, [req.user.id]
       )
-      await awardSeeds(m.uploader_id, 10, 'like_received')
-      notify(m.uploader_id, 'note_posted', `❤️ ${liker?.name} liked your memory`, '+10 🌱 seeds', '/my-world').catch(()=>{})
+      notify(m.uploader_id, 'note_posted', `❤️ ${liker?.name} liked your memory`, '', '/my-world').catch(()=>{})
     }
     res.json({ ok:true, likeCount: parseInt(count, 10) })
   } catch(e) { res.status(500).json({ error:'Server error' }) }
 })
 
 // GET /api/moments/:id/comments
-// Visibility rules:
-// - Uploader sees ALL comments
-// - Commenter sees their OWN comment + comments from their connections
-// - Others see only comments from their mutual connections
 router.get('/:id/comments', requireAuth, async (req, res) => {
   try {
-    const { rows:[moment] } = await pool.query(
-      `SELECT uploader_id FROM moments WHERE id=$1`, [req.params.id]
-    )
-    if (!moment) return res.status(404).json({ error:'Not found' })
-
-    const isUploader = moment.uploader_id === req.user.id
-
-    // Get viewer's connection IDs
-    const { rows: myConns } = await pool.query(
-      `SELECT CASE WHEN user_id_1=$1 THEN user_id_2 ELSE user_id_1 END AS friend_id
-       FROM friendships WHERE (user_id_1=$1 OR user_id_2=$1) AND status='accepted'`,
-      [req.user.id]
-    )
-    const myConnIds = new Set(myConns.map(r => r.friend_id))
-    myConnIds.add(req.user.id) // always include self
-
     const { rows } = await pool.query(
       `SELECT mc.id, mc.text, mc.created_at,
               COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS author_name,
@@ -237,13 +221,7 @@ router.get('/:id/comments', requireAuth, async (req, res) => {
        WHERE mc.moment_id=$1 ORDER BY mc.created_at ASC`,
       [req.params.id]
     )
-
-    // Filter: uploader sees all; others see own + comments from their connections
-    const visible = isUploader
-      ? rows
-      : rows.filter(r => myConnIds.has(r.user_id))
-
-    res.json(visible.map(r => ({ id:r.id, text:r.text, authorName:r.author_name, userId:r.user_id, createdAt:r.created_at })))
+    res.json(rows.map(r => ({ id:r.id, text:r.text, authorName:r.author_name, userId:r.user_id, createdAt:r.created_at })))
   } catch(e) { res.status(500).json({ error:'Server error' }) }
 })
 
@@ -270,7 +248,7 @@ router.post('/:id/comment', requireAuth, async (req, res) => {
     )
     // Notify uploader + award seeds for comment
     if (m.uploader_id !== req.user.id) {
-      await awardSeeds(m.uploader_id, 10, 'comment_received')
+      await pool.query(`UPDATE users SET seeds=COALESCE(seeds,0)+10 WHERE id=$1`, [m.uploader_id])
       notify(m.uploader_id, 'note_posted', `📝 ${u.name} left a note on your memory`,
         `+10 🌱 · "${text.trim().slice(0,40)}"`, '/my-world').catch(()=>{})
     }
@@ -307,10 +285,11 @@ router.get('/connections', requireAuth, async (req, res) => {
       `SELECT m.id, m.cdn_url, m.caption, m.note_emoji, m.expires_at, m.created_at,
               m.uploader_id,
               COALESCE(u.nickname, split_part(u.full_name,' ',1)) AS uploader_name,
-              (SELECT COUNT(*) FROM moment_likes WHERE moment_id=m.id)::int AS like_count,
-              (SELECT COUNT(*) FROM moment_comments WHERE moment_id=m.id)::int AS comment_count,
-              EXISTS(SELECT 1 FROM moment_tags mt WHERE mt.moment_id=m.id AND mt.user_id=$1) AS is_tagged,
-              EXISTS(SELECT 1 FROM moment_likes ml WHERE ml.moment_id=m.id AND ml.user_id=$1) AS has_liked
+              (SELECT COUNT(*) FROM moment_likes WHERE moment_id=m.id) AS like_count,
+              (SELECT COUNT(*) FROM moment_comments WHERE moment_id=m.id) AS comment_count,
+              EXISTS(
+                SELECT 1 FROM moment_tags mt WHERE mt.moment_id=m.id AND mt.user_id=$1
+              ) AS is_tagged
        FROM moments m
        JOIN users u ON u.id=m.uploader_id
        WHERE m.expires_at > NOW()
@@ -342,10 +321,11 @@ router.get('/by/:userId', requireAuth, async (req, res) => {
     const { rows } = await pool.query(
       `SELECT m.id, m.cdn_url, m.caption, m.note_emoji, m.expires_at, m.created_at,
               m.uploader_id,
-              (SELECT COUNT(*) FROM moment_likes WHERE moment_id=m.id)::int AS like_count,
-              (SELECT COUNT(*) FROM moment_comments WHERE moment_id=m.id)::int AS comment_count,
-              EXISTS(SELECT 1 FROM moment_tags mt WHERE mt.moment_id=m.id AND mt.user_id=$2) AS is_tagged,
-              EXISTS(SELECT 1 FROM moment_likes ml WHERE ml.moment_id=m.id AND ml.user_id=$2) AS has_liked
+              (SELECT COUNT(*) FROM moment_likes WHERE moment_id=m.id) AS like_count,
+              (SELECT COUNT(*) FROM moment_comments WHERE moment_id=m.id) AS comment_count,
+              EXISTS(
+                SELECT 1 FROM moment_tags mt WHERE mt.moment_id=m.id AND mt.user_id=$2
+              ) AS is_tagged
        FROM moments m
        WHERE m.uploader_id=$1 AND m.expires_at > NOW()
        ORDER BY m.created_at DESC

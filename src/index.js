@@ -12,6 +12,7 @@ import usersRoutes        from './routes/users.js';
 import nicknamesRoutes    from './routes/nicknames.js';
 import lettersRoutes      from './routes/letters.js';
 import adminRoutes        from './routes/admin.js';
+import { startR2CleanupPoller } from './utils/r2Cleanup.js';
 import { startDecayPoller } from './utils/decayPoller.js';
 import groveRoutes        from './routes/grove.js';
 import jobsRoutes         from './routes/jobs.js';
@@ -45,8 +46,6 @@ app.use(cors({
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
-    // Allow Vercel preview deployments
-    if (origin.match(/https:\/\/treedegrees.*\.vercel\.app$/)) return callback(null, true);
     callback(new Error(`CORS blocked: ${origin}`));
   },
   credentials: true,
@@ -159,14 +158,4 @@ app.listen(PORT, () => {
   // Start background pollers (staggered to avoid DB burst)
   startArrivedPoller();
   startJobPollers();
-
-  // Self-ping every 4 minutes to prevent Render free tier hibernation
-  if (process.env.NODE_ENV === 'production') {
-    setInterval(() => {
-      fetch(`https://treedegrees-api.onrender.com/health`)
-        .then(() => console.log('[keepalive] ping ok'))
-        .catch(() => {})
-    }, 4 * 60 * 1000)
-    console.log('[keepalive] self-ping started (every 4 min)')
-  }
 });
