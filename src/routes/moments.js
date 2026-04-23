@@ -47,7 +47,7 @@ router.post('/', requireAuth, async (req, res) => {
     : 999;
   if (hoursSinceLast < 24) {
     const hoursLeft = (24 - hoursSinceLast).toFixed(1);
-    return res.status(429).json({ error: \`You can post a new memory in \${hoursLeft}h\`, hoursLeft: parseFloat(hoursLeft) });
+    return res.status(429).json({ error: `You can post a new memory in ${hoursLeft}h`, hoursLeft: parseFloat(hoursLeft) });
   }
   const seedsAlreadyToday = lastPost?.seeds_today || false;
 
