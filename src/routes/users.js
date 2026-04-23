@@ -336,7 +336,6 @@ router.get('/feed', requireAuth, async (req, res) => {
 });
 
 export { getCapitalCoords };
-export default router;
 
 // POST /api/users/award-streak-saver — add 1 streak saver to user (called after marketplace purchase)
 router.post('/award-streak-saver', requireAuth, async (req, res) => {
