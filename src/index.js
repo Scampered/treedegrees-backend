@@ -25,7 +25,6 @@ import marketRoutes       from './routes/market.js';
 import profileRoutes      from './routes/profile.js';
 import momentsRoutes      from './routes/moments.js';
 import { requireAuth }    from './middleware/auth.js';
-import pool               from './db/pool.js';
 import { verifyToken }    from './utils/auth.js';
 import { startArrivedPoller } from './utils/arrivedPoller.js';
 import { startJobPollers }    from './utils/jobPollers.js';

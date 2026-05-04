@@ -22,15 +22,22 @@ async function getStreak(client, uid1, uid2) {
 
 async function upsertStreak(client, u1, u2, data) {
   await client.query(
-    `INSERT INTO letter_streaks (user_id_1, user_id_2, streak_days, fuel, last_day_processed, user1_sent_today, user2_sent_today, broken_at, broken_streak_days)
+    `INSERT INTO letter_streaks
+       (user_id_1, user_id_2, streak_days, streak_savers, last_day_processed,
+        user1_sent_today, user2_sent_today, broken_at, broken_streak_days)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
      ON CONFLICT (user_id_1, user_id_2) DO UPDATE SET
-       streak_days=$3, fuel=$4, last_day_processed=$5,
+       streak_days=$3, streak_savers=$4, last_day_processed=$5,
        user1_sent_today=$6, user2_sent_today=$7,
        broken_at=$8, broken_streak_days=$9`,
-    [u1, u2, data.streak_days, data.fuel, data.last_day_processed,
-     data.user1_sent_today, data.user2_sent_today,
-     data.broken_at || null, data.broken_streak_days || 0]
+    [u1, u2,
+     data.streak_days,
+     data.streak_savers ?? 3,
+     data.last_day_processed,
+     data.user1_sent_today,
+     data.user2_sent_today,
+     data.broken_at || null,
+     data.broken_streak_days || 0]
   );
 }
 
@@ -300,14 +307,14 @@ router.get('/streaks', requireAuth, async (req, res) => {
           lastDayProcessed: streak.last_day_processed || null,
           brokenAt: streak.broken_at || null,
           brokenStreakDays: streak.broken_streak_days || 0,
+          streakSavers: streak.streak_savers ?? 3,
         });
       }
     } finally {
       client.release();
     }
-    // Include user's streak saver count
-    const { rows: [meRow] } = await pool.query(`SELECT streak_savers FROM users WHERE id=$1`, [req.user.id])
-    res.json({ savers: meRow?.streak_savers ?? 3, streaks: results });
+    // streak_savers is per-friendship, embed in each streak result
+    res.json(results);
   } catch (err) {
     console.error('Streaks error:', err.message);
     res.status(500).json({ error: 'Server error' });
@@ -412,64 +419,58 @@ router.delete('/:id', requireAuth, async (req, res) => {
 });
 
 
-// POST /api/letters/use-streak-saver — restore a broken streak using a saver
+// POST /api/letters/use-streak-saver — restore broken streak using per-friendship saver
 router.post('/use-streak-saver', requireAuth, async (req, res) => {
   const { friendId } = req.body
   if (!friendId) return res.status(400).json({ error: 'friendId required' })
 
-  // ── Validate before touching the pool ───────────────────────────────────
   const [u1, u2] = [req.user.id, friendId].sort()
-
-  const client = await pool.connect()
-  let errMsg = null
-  let result = null
+  const client   = await pool.connect()
+  let errMsg = null, result = null
 
   try {
-    await client.query('SET statement_timeout = 8000') // 8s max per query
+    await client.query('SET statement_timeout = 8000')
     await client.query('BEGIN')
 
-    // Check user has savers
-    const { rows: [me] } = await client.query(
-      `SELECT streak_savers FROM users WHERE id=$1 FOR UPDATE NOWAIT`, [req.user.id]
-    )
-    if (!me || (me.streak_savers || 0) < 1)
-      throw Object.assign(new Error('No streak savers left — buy more in the Marketplace'), { status: 400 })
-
-    // Get the broken streak
     const { rows: [streak] } = await client.query(
-      `SELECT * FROM letter_streaks WHERE user_id_1=$1 AND user_id_2=$2 FOR UPDATE NOWAIT`, [u1, u2]
+      `SELECT * FROM letter_streaks WHERE user_id_1=$1 AND user_id_2=$2 FOR UPDATE NOWAIT`,
+      [u1, u2]
     )
-    if (!streak || !streak.broken_at)
-      throw Object.assign(new Error('No broken streak to restore'), { status: 400 })
+    if (!streak)
+      throw Object.assign(new Error('No streak found with this user'), { status: 404 })
+    if (!streak.broken_at)
+      throw Object.assign(new Error('Streak is not broken'), { status: 400 })
 
-    // Check within 3-day window
+    // 2-day recovery window
     const daysSinceBroken = (Date.now() - new Date(streak.broken_at).getTime()) / 86400000
-    if (daysSinceBroken >= 3)
-      throw Object.assign(new Error('Streak saver window has passed (3 days)'), { status: 400 })
+    if (daysSinceBroken >= 2)
+      throw Object.assign(new Error('Recovery window passed (2 days after break)'), { status: 400 })
 
-    // Restore streak + deduct saver — all on same client, no second connection
+    const saversLeft = streak.streak_savers ?? 3
+    if (saversLeft < 1)
+      throw Object.assign(new Error('No streak savers left for this friendship'), { status: 400 })
+
+    // Restore streak, deduct 1 saver from this friendship
     await client.query(
-      `UPDATE letter_streaks SET streak_days=$1, broken_at=NULL, broken_streak_days=0
+      `UPDATE letter_streaks
+       SET streak_days=$1, broken_at=NULL, broken_streak_days=0,
+           streak_savers=streak_savers-1
        WHERE user_id_1=$2 AND user_id_2=$3`,
       [streak.broken_streak_days || 1, u1, u2]
     )
-    await client.query(
-      `UPDATE users SET streak_savers=streak_savers-1 WHERE id=$1`, [req.user.id]
-    )
-    await client.query(
-      `INSERT INTO seeds_log (user_id, amount, reason, label)
-       VALUES ($1,0,'streak_saver_used','💝 Used a streak saver')`,
-      [req.user.id]
-    )
     await client.query('COMMIT')
 
-    result = { ok: true, restoredDays: streak.broken_streak_days, saversLeft: me.streak_savers - 1 }
+    result = {
+      ok: true,
+      restoredDays: streak.broken_streak_days,
+      streakSaversLeft: saversLeft - 1,
+    }
   } catch(e) {
     await client.query('ROLLBACK').catch(() => {})
     errMsg = { status: e.status || 500, msg: e.message || 'Server error' }
     if (!e.status) console.error('[use-streak-saver]', e.message)
   } finally {
-    client.release() // ALWAYS releases before sending response
+    client.release()
   }
 
   if (errMsg) return res.status(errMsg.status).json({ error: errMsg.msg })
