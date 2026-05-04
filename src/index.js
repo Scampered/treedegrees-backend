@@ -1,5 +1,6 @@
 // src/index.js
-import express from 'express';
+import express from 'express'
+import pool from './db/pool.js';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
@@ -30,6 +31,16 @@ import { startArrivedPoller } from './utils/arrivedPoller.js';
 import { startJobPollers }    from './utils/jobPollers.js';
 
 dotenv.config();
+
+
+// ── Pool health monitor ───────────────────────────────────────────────────────
+function startPoolMonitor(pool) {
+  setInterval(() => {
+    const { totalCount: total, idleCount: idle, waitingCount: waiting } = pool
+    if (waiting > 0 || (total > 0 && idle === 0))
+      console.warn(`[pool] WARN total=${total} idle=${idle} waiting=${waiting}`)
+  }, 30000)
+}
 
 const app  = express();
 const PORT = process.env.PORT || 3001;

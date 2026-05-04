@@ -50,13 +50,16 @@ function resolveDisplayName(userId, ownNickname, myNicknameMap) {
 
 // ── POST /api/letters — send a letter ────────────────────────────────────────
 router.post('/', requireAuth, async (req, res) => {
+  // Validate before acquiring connection
+  const { recipientId, content } = req.body;
+  if (!recipientId || !content?.trim())
+    return res.status(400).json({ error: 'Recipient and content are required' });
+  if (content.trim().length > 500)
+    return res.status(400).json({ error: 'Letters are 500 characters max' });
+
   const client = await pool.connect();
   try {
-    const { recipientId, content } = req.body;
-    if (!recipientId || !content?.trim())
-      return res.status(400).json({ error: 'Recipient and content are required' });
-    if (content.trim().length > 500)
-      return res.status(400).json({ error: 'Letters are 500 characters max' });
+    await client.query('SET statement_timeout = 10000')
 
     // Must be a direct friend
     const [uid1, uid2] = [req.user.id, recipientId].sort();
@@ -338,7 +341,7 @@ router.patch('/:id/arrived', requireAuth, async (req, res) => {
 
     if (!letter) {
       console.log(`[arrived] UPDATE returned no rows — already awarded, wrong recipient, or not yet arrived`);
-      return res.status(404).json({ error: 'Already processed or not found' });
+      throw Object.assign(new Error('Already processed or not found'), { status: 404 });
     }
 
     const MAX_MS        = 72 * 3600 * 1000;
@@ -400,7 +403,7 @@ router.delete('/:id', requireAuth, async (req, res) => {
       [req.params.id, req.user.id]
     );
     if (rows.length === 0)
-      return res.status(404).json({ error: 'Letter not found, already arrived, or not yours to recall' });
+      throw Object.assign(new Error('Letter not found, already arrived, or not yours to recall'), { status: 404 });
     res.json({ message: 'Letter recalled successfully' });
   } catch (err) {
     console.error('Recall letter error:', err.message);
@@ -414,53 +417,64 @@ router.post('/use-streak-saver', requireAuth, async (req, res) => {
   const { friendId } = req.body
   if (!friendId) return res.status(400).json({ error: 'friendId required' })
 
+  // ── Validate before touching the pool ───────────────────────────────────
+  const [u1, u2] = [req.user.id, friendId].sort()
+
   const client = await pool.connect()
+  let errMsg = null
+  let result = null
+
   try {
+    await client.query('SET statement_timeout = 8000') // 8s max per query
     await client.query('BEGIN')
 
     // Check user has savers
     const { rows: [me] } = await client.query(
-      `SELECT streak_savers FROM users WHERE id=$1 FOR UPDATE`, [req.user.id]
+      `SELECT streak_savers FROM users WHERE id=$1 FOR UPDATE NOWAIT`, [req.user.id]
     )
     if (!me || (me.streak_savers || 0) < 1)
-      return res.status(400).json({ error: 'No streak savers left — buy more in the Marketplace' })
+      throw Object.assign(new Error('No streak savers left — buy more in the Marketplace'), { status: 400 })
 
     // Get the broken streak
-    const [u1, u2] = [req.user.id, friendId].sort()
     const { rows: [streak] } = await client.query(
-      `SELECT * FROM letter_streaks WHERE user_id_1=$1 AND user_id_2=$2 FOR UPDATE`, [u1, u2]
+      `SELECT * FROM letter_streaks WHERE user_id_1=$1 AND user_id_2=$2 FOR UPDATE NOWAIT`, [u1, u2]
     )
     if (!streak || !streak.broken_at)
-      return res.status(400).json({ error: 'No broken streak to restore' })
+      throw Object.assign(new Error('No broken streak to restore'), { status: 400 })
 
     // Check within 3-day window
     const daysSinceBroken = (Date.now() - new Date(streak.broken_at).getTime()) / 86400000
     if (daysSinceBroken >= 3)
-      return res.status(400).json({ error: 'Streak saver window has passed (3 days)' })
+      throw Object.assign(new Error('Streak saver window has passed (3 days)'), { status: 400 })
 
-    // Restore streak + deduct saver
+    // Restore streak + deduct saver — all on same client, no second connection
     await client.query(
-      `UPDATE letter_streaks SET streak_days=$1, broken_at=NULL, broken_streak_days=0 WHERE user_id_1=$2 AND user_id_2=$3`,
+      `UPDATE letter_streaks SET streak_days=$1, broken_at=NULL, broken_streak_days=0
+       WHERE user_id_1=$2 AND user_id_2=$3`,
       [streak.broken_streak_days || 1, u1, u2]
     )
     await client.query(
       `UPDATE users SET streak_savers=streak_savers-1 WHERE id=$1`, [req.user.id]
     )
-    // Log seeds event
-    await pool.query(
-      `INSERT INTO seeds_log (user_id, amount, reason, label) VALUES ($1,0,'streak_saver_used','💝 Used a streak saver')`,
+    await client.query(
+      `INSERT INTO seeds_log (user_id, amount, reason, label)
+       VALUES ($1,0,'streak_saver_used','💝 Used a streak saver')`,
       [req.user.id]
-    ).catch(()=>{})
-
+    )
     await client.query('COMMIT')
-    // Saver used = fuel consumption = crude demand rises
-    updateMarketPrice('crude', 3).catch(() => {})
-    res.json({ ok: true, restoredDays: streak.broken_streak_days, saversLeft: me.streak_savers - 1 })
+
+    result = { ok: true, restoredDays: streak.broken_streak_days, saversLeft: me.streak_savers - 1 }
   } catch(e) {
-    await client.query('ROLLBACK')
-    console.error(e.message)
-    res.status(500).json({ error: 'Server error' })
-  } finally { client.release() }
+    await client.query('ROLLBACK').catch(() => {})
+    errMsg = { status: e.status || 500, msg: e.message || 'Server error' }
+    if (!e.status) console.error('[use-streak-saver]', e.message)
+  } finally {
+    client.release() // ALWAYS releases before sending response
+  }
+
+  if (errMsg) return res.status(errMsg.status).json({ error: errMsg.msg })
+  updateMarketPrice('crude', 3).catch(() => {})
+  res.json(result)
 })
 
 export default router;
